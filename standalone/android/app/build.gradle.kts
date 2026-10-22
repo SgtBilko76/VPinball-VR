@@ -101,6 +101,8 @@ android {
             dimension = "platform"
             buildConfigField("boolean", "IS_QUEST", "false")
             buildConfigField("boolean", "IS_VR", "true")
+            // PICO 4 and Neo 3 run Android 10, the native libraries are built for API 29 (see platforms/android-arm64-v8a/external.sh)
+            minSdk = 29
             // Optional display version for PICO builds (e.g. -PpicoVersionName="PICO Beta 0.1"), versionCode is unchanged
             project.findProperty("picoVersionName")?.let { versionName = it.toString() }
         }

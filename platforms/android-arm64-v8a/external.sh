@@ -4,7 +4,17 @@ set -e
 
 source ./platforms/config.sh
 
+# Minimum Android API level of the native libraries. 29 (Android 10) is needed by
+# PICO 4 / Neo 3 headsets. Most dependencies hardcode their own level in their
+# CMakeLists.txt (set before project()), which -DCMAKE_SYSTEM_VERSION can't override,
+# so a toolchain file passed through the environment forces the level everywhere,
+# including the nested builds started by the libdmdutil and libdof scripts.
+ANDROID_API=29
+export VPX_ANDROID_API=${ANDROID_API}
+export CMAKE_TOOLCHAIN_FILE="$(pwd)/platforms/android-arm64-v8a/android-api.cmake"
+
 echo "Building external libraries..."
+echo "  ANDROID_API: ${ANDROID_API}"
 echo "  SDL_SHA: ${SDL_SHA}"
 echo "  SDL_IMAGE_SHA: ${SDL_IMAGE_SHA}"
 echo "  SDL_TTF_SHA: ${SDL_TTF_SHA}"
@@ -36,7 +46,7 @@ cd "external/android-arm64-v8a/${BUILD_TYPE}"
 # build SDL3, SDL3_image, SDL3_ttf
 #
 
-SDL3_EXPECTED_SHA="${SDL_SHA}-${SDL_IMAGE_SHA}-${SDL_TTF_SHA}_001"
+SDL3_EXPECTED_SHA="${SDL_SHA}-${SDL_IMAGE_SHA}-${SDL_TTF_SHA}_001-api${ANDROID_API}"
 SDL3_FOUND_SHA="$([ -f SDL3/cache.txt ] && cat SDL3/cache.txt || echo "")"
 
 if [ "${SDL3_EXPECTED_SHA}" != "${SDL3_FOUND_SHA}" ]; then
@@ -57,7 +67,7 @@ if [ "${SDL3_EXPECTED_SHA}" != "${SDL3_FOUND_SHA}" ]; then
       -DSDL_DISABLE_ANDROID_JAR=OFF \
       -DSDL_CAMERA=OFF \
       -DCMAKE_SYSTEM_NAME=Android \
-      -DCMAKE_SYSTEM_VERSION=33 \
+      -DCMAKE_SYSTEM_VERSION=${ANDROID_API} \
       -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
       -DANDROID_NDK=${ANDROID_NDK_HOME} \
       -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
@@ -80,7 +90,7 @@ if [ "${SDL3_EXPECTED_SHA}" != "${SDL3_FOUND_SHA}" ]; then
       -DSDLIMAGE_WEBP=OFF \
       -DSDL3_DIR=../SDL/build \
       -DCMAKE_SYSTEM_NAME=Android \
-      -DCMAKE_SYSTEM_VERSION=33 \
+      -DCMAKE_SYSTEM_VERSION=${ANDROID_API} \
       -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
       -DCMAKE_SHARED_LINKER_FLAGS="-Wl,--undefined-version" \
       -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
@@ -100,7 +110,7 @@ if [ "${SDL3_EXPECTED_SHA}" != "${SDL3_FOUND_SHA}" ]; then
       -DSDLTTF_HARFBUZZ=ON \
       -DSDL3_DIR=../SDL/build \
       -DCMAKE_SYSTEM_NAME=Android \
-      -DCMAKE_SYSTEM_VERSION=33 \
+      -DCMAKE_SYSTEM_VERSION=${ANDROID_API} \
       -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
       -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
       -B build
@@ -116,7 +126,7 @@ fi
 # build freeimage
 #
 
-FREEIMAGE_EXPECTED_SHA="${FREEIMAGE_SHA}_001"
+FREEIMAGE_EXPECTED_SHA="${FREEIMAGE_SHA}_001-api${ANDROID_API}"
 FREEIMAGE_FOUND_SHA="$([ -f freeimage/cache.txt ] && cat freeimage/cache.txt || echo "")"
 
 if [ "${FREEIMAGE_EXPECTED_SHA}" != "${FREEIMAGE_FOUND_SHA}" ]; then
@@ -148,7 +158,7 @@ fi
 # build bgfx
 #
 
-BGFX_EXPECTED_SHA="${BGFX_CMAKE_VERSION}-${BGFX_PATCH_SHA}_002"
+BGFX_EXPECTED_SHA="${BGFX_CMAKE_VERSION}-${BGFX_PATCH_SHA}_002-api${ANDROID_API}"
 BGFX_FOUND_SHA="$([ -f bgfx/cache.txt ] && cat bgfx/cache.txt || echo "")"
 
 if [ "${BGFX_EXPECTED_SHA}" != "${BGFX_FOUND_SHA}" ]; then
@@ -167,7 +177,7 @@ if [ "${BGFX_EXPECTED_SHA}" != "${BGFX_FOUND_SHA}" ]; then
    mv ../bgfx-${BGFX_PATCH_SHA} bgfx
    cmake -S. \
       -DCMAKE_SYSTEM_NAME=Android \
-      -DCMAKE_SYSTEM_VERSION=33 \
+      -DCMAKE_SYSTEM_VERSION=${ANDROID_API} \
       -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
       -DBGFX_BUILD_EXAMPLES=OFF \
       -DBGFX_BUILD_TOOLS=OFF \
@@ -188,7 +198,7 @@ fi
 # build pinmame
 #
 
-PINMAME_EXPECTED_SHA="${PINMAME_SHA}_001"
+PINMAME_EXPECTED_SHA="${PINMAME_SHA}_001-api${ANDROID_API}"
 PINMAME_FOUND_SHA="$([ -f pinmame/cache.txt ] && cat pinmame/cache.txt || echo "")"
 
 if [ "${PINMAME_EXPECTED_SHA}" != "${PINMAME_FOUND_SHA}" ]; then
@@ -221,7 +231,7 @@ fi
 # build openxr
 #
 
-OPENXR_EXPECTED_SHA="${OPENXR_SHA}_001"
+OPENXR_EXPECTED_SHA="${OPENXR_SHA}_001-api${ANDROID_API}"
 OPENXR_FOUND_SHA="$([ -f openxr/cache.txt ] && cat openxr/cache.txt || echo "")"
 
 if [ "${OPENXR_EXPECTED_SHA}" != "${OPENXR_FOUND_SHA}" ]; then
@@ -237,7 +247,7 @@ if [ "${OPENXR_EXPECTED_SHA}" != "${OPENXR_FOUND_SHA}" ]; then
    cd openxr
    cmake  \
       -DCMAKE_SYSTEM_NAME=Android \
-      -DCMAKE_SYSTEM_VERSION=33 \
+      -DCMAKE_SYSTEM_VERSION=${ANDROID_API} \
       -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
       -DBUILD_TESTS=OFF \
       -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
@@ -254,7 +264,7 @@ fi
 # build libdmdutil
 #
 
-LIBDMDUTIL_EXPECTED_SHA="${LIBDMDUTIL_SHA}_001"
+LIBDMDUTIL_EXPECTED_SHA="${LIBDMDUTIL_SHA}_001-api${ANDROID_API}"
 LIBDMDUTIL_FOUND_SHA="$([ -f libdmdutil/cache.txt ] && cat libdmdutil/cache.txt || echo "")"
 
 if [ "${LIBDMDUTIL_EXPECTED_SHA}" != "${LIBDMDUTIL_FOUND_SHA}" ]; then
@@ -287,7 +297,7 @@ fi
 # build libaltsound
 #
 
-LIBALTSOUND_EXPECTED_SHA="${LIBALTSOUND_SHA}_001"
+LIBALTSOUND_EXPECTED_SHA="${LIBALTSOUND_SHA}_001-api${ANDROID_API}"
 LIBALTSOUND_FOUND_SHA="$([ -f libaltsound/cache.txt ] && cat libaltsound/cache.txt || echo "")"
 
 if [ "${LIBALTSOUND_EXPECTED_SHA}" != "${LIBALTSOUND_FOUND_SHA}" ]; then
@@ -319,7 +329,7 @@ fi
 # build libdof
 #
 
-LIBDOF_EXPECTED_SHA="${LIBDOF_SHA}_001"
+LIBDOF_EXPECTED_SHA="${LIBDOF_SHA}_001-api${ANDROID_API}"
 LIBDOF_FOUND_SHA="$([ -f libdof/cache.txt ] && cat libdof/cache.txt || echo "")"
 
 if [ "${LIBDOF_EXPECTED_SHA}" != "${LIBDOF_FOUND_SHA}" ]; then
@@ -352,7 +362,7 @@ fi
 # build libwinevbs
 #
 
-LIBWINEVBS_EXPECTED_SHA="${LIBWINEVBS_SHA}"
+LIBWINEVBS_EXPECTED_SHA="${LIBWINEVBS_SHA}-api${ANDROID_API}"
 LIBWINEVBS_FOUND_SHA="$([ -f libwinevbs/cache.txt ] && cat libwinevbs/cache.txt || echo "")"
 
 if [ "${LIBWINEVBS_EXPECTED_SHA}" != "${LIBWINEVBS_FOUND_SHA}" ]; then
@@ -384,7 +394,7 @@ fi
 # build ffmpeg
 #
 
-FFMPEG_EXPECTED_SHA="${FFMPEG_SHA}_001"
+FFMPEG_EXPECTED_SHA="${FFMPEG_SHA}_001-api${ANDROID_API}"
 FFMPEG_FOUND_SHA="$([ -f ffmpeg/cache.txt ] && cat ffmpeg/cache.txt || echo "")"
 
 if [ "${FFMPEG_EXPECTED_SHA}" != "${FFMPEG_FOUND_SHA}" ]; then
@@ -408,11 +418,11 @@ if [ "${FFMPEG_EXPECTED_SHA}" != "${FFMPEG_FOUND_SHA}" ]; then
       --target-os=android \
       --arch=aarch64 \
       --sysroot=${TOOLCHAIN}/sysroot \
-      --cc=${TOOLCHAIN}/bin/aarch64-linux-android33-clang \
-      --cxx=${TOOLCHAIN}/bin/aarch64-linux-android33-clang++ \
-      --ld=${TOOLCHAIN}/bin/aarch64-linux-android33-clang \
+      --cc=${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang \
+      --cxx=${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang++ \
+      --ld=${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang \
       --ar=${TOOLCHAIN}/bin/llvm-ar \
-      --as=${TOOLCHAIN}/bin/aarch64-linux-android33-clang \
+      --as=${TOOLCHAIN}/bin/aarch64-linux-android${ANDROID_API}-clang \
       --nm=${TOOLCHAIN}/bin/llvm-nm \
       --ranlib=${TOOLCHAIN}/bin/llvm-ranlib \
       --strip=${TOOLCHAIN}/bin/llvm-strip \
@@ -434,7 +444,7 @@ fi
 # build libzip
 #
 
-LIBZIP_EXPECTED_SHA="${LIBZIP_SHA}_001"
+LIBZIP_EXPECTED_SHA="${LIBZIP_SHA}_001-api${ANDROID_API}"
 LIBZIP_FOUND_SHA="$([ -f libzip/cache.txt ] && cat libzip/cache.txt || echo "")"
 
 if [ "${LIBZIP_EXPECTED_SHA}" != "${LIBZIP_FOUND_SHA}" ]; then
@@ -459,7 +469,7 @@ if [ "${LIBZIP_EXPECTED_SHA}" != "${LIBZIP_FOUND_SHA}" ]; then
       -DBUILD_EXAMPLES=OFF \
       -DBUILD_DOC=OFF \
       -DCMAKE_SYSTEM_NAME=Android \
-      -DCMAKE_SYSTEM_VERSION=33 \
+      -DCMAKE_SYSTEM_VERSION=${ANDROID_API} \
       -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
       -DANDROID_NDK=${ANDROID_NDK_HOME} \
       -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
