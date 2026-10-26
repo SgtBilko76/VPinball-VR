@@ -75,6 +75,8 @@ tasks {
 android {
     namespace = "org.vpinball.app"
     compileSdk = 35
+    // Installed NDK used by AGP to strip debug symbols from the native libraries (smaller APKs)
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "org.vpinball.vpinball_bgfx"
