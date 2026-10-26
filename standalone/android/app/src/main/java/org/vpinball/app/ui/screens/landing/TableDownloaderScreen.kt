@@ -24,6 +24,7 @@ fun TableDownloaderScreen(onClose: () -> Unit, viewModel: TableDownloaderViewMod
     val status by viewModel.status.collectAsState()
     val progress by viewModel.progress.collectAsState()
     val downloading by viewModel.downloading.collectAsState()
+    val cancellable by viewModel.cancellable.collectAsState()
 
     VPinballTheme {
         Scaffold(
@@ -44,7 +45,7 @@ fun TableDownloaderScreen(onClose: () -> Unit, viewModel: TableDownloaderViewMod
                     }
                     Text(status, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
                     if (downloading != null) {
-                        TextButton(onClick = { viewModel.cancelDownload() }) { Text("Cancel") }
+                        TextButton(onClick = { viewModel.cancelDownload() }, enabled = cancellable) { Text("Cancel") }
                     }
                 }
                 if (downloading != null) {

@@ -7,8 +7,11 @@ import java.io.File
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import javax.xml.parsers.DocumentBuilderFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -59,6 +62,12 @@ class TableDownloaderViewModel(private val context: Context) : ViewModel() {
 
     private val _downloading = MutableStateFlow<String?>(null)
     val downloading: StateFlow<String?> = _downloading.asStateFlow()
+
+    /** False during the final import step, when cancelling is no longer allowed. */
+    private val _cancellable = MutableStateFlow(true)
+    val cancellable: StateFlow<Boolean> = _cancellable.asStateFlow()
+
+    @Volatile private var currentCall: okhttp3.Call? = null
 
     // ROM and NVRAM files in the collection, keyed by lower-case ROM name.
     private val roms = mutableMapOf<String, String>()
@@ -169,6 +178,7 @@ class TableDownloaderViewModel(private val context: Context) : ViewModel() {
                             nvrams[romName.lowercase()]?.let { nvPath ->
                                 val nv = File(work, nvPath.substringAfterLast('/'))
                                 runCatching { download(nvPath, nv) {} }.onSuccess { extras["pinmame/nvram/${nv.name}"] = nv }
+                                ensureActive() // runCatching also swallows cancellation
                             }
                             romNote = "ROM $romName"
                         } else {
@@ -178,21 +188,37 @@ class TableDownloaderViewModel(private val context: Context) : ViewModel() {
 
                     _status.value = "Importing ${entry.name}..."
                     _progress.value = null
-                    val table = TableManager.getInstance().importDownloadedTable(vpx, extras)
+                    // Too late to cancel: a half-copied table folder would be worse than finishing.
+                    _cancellable.value = false
+                    val table = withContext(NonCancellable) { TableManager.getInstance().importDownloadedTable(vpx, extras) }
                     _status.value = if (table != null) "${entry.name} is ready ($romNote)." else "Import of ${entry.name} failed."
+                } catch (e: CancellationException) {
+                    _status.value = "Download of ${entry.name} cancelled."
+                    throw e
                 } catch (e: Exception) {
-                    VPinballManager.log(VPinballLogLevel.ERROR, "Download of ${entry.name} failed: $e")
-                    _status.value = if (!isActive) "Download cancelled." else "Download failed: ${describe(e)}"
+                    if (!isActive) {
+                        // Cutting the network call surfaces as an I/O error, not as a cancellation.
+                        _status.value = "Download of ${entry.name} cancelled."
+                    } else {
+                        VPinballManager.log(VPinballLogLevel.ERROR, "Download of ${entry.name} failed: $e")
+                        _status.value = "Download failed: ${describe(e)}"
+                    }
                 } finally {
-                    withContext(Dispatchers.IO) { work.deleteRecursively() }
+                    // Reset the UI first; cleanup must also run when the job was cancelled.
+                    currentCall = null
                     _progress.value = null
                     _downloading.value = null
+                    _cancellable.value = true
+                    withContext(NonCancellable + Dispatchers.IO) { work.deleteRecursively() }
                 }
             }
     }
 
     fun cancelDownload() {
+        if (!_cancellable.value) return
+        _status.value = "Cancelling..."
         downloadJob?.cancel()
+        currentCall?.cancel() // stop the network transfer right away
     }
 
     /** Downloads with up to 3 attempts: archive.org sometimes answers with a temporary 5xx error. */
@@ -216,7 +242,8 @@ class TableDownloaderViewModel(private val context: Context) : ViewModel() {
         withContext(Dispatchers.IO) {
             val request = Request.Builder().url(urlFor(path)).build()
             val call = client.newCall(request)
-            coroutineContext[Job]?.invokeOnCompletion { if (it != null) call.cancel() }
+            currentCall = call
+            ensureActive()
             call.execute().use { response ->
                 if (response.code >= 500) throw ServerBusyException(response.code)
                 if (!response.isSuccessful) throw Exception("HTTP ${response.code} for ${path.substringAfterLast('/')}")
@@ -227,6 +254,7 @@ class TableDownloaderViewModel(private val context: Context) : ViewModel() {
                         var total = 0L
                         var lastReport = 0L
                         while (true) {
+                            ensureActive()
                             val n = input.read(buffer)
                             if (n < 0) break
                             output.write(buffer, 0, n)
