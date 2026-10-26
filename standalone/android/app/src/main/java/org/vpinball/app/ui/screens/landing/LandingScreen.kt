@@ -91,6 +91,7 @@ import org.vpinball.app.util.hasScriptFile
 @Composable
 fun LandingScreen(
     onViewFile: (file: File) -> Unit,
+    onOpenDownloader: () -> Unit = {},
     modifier: Modifier = Modifier,
     vpinballModel: VPinballModel = koinActivityViewModel(),
     viewModel: LandingScreenViewModel = koinViewModel(),
@@ -309,6 +310,10 @@ fun LandingScreen(
                                         } catch (e: Exception) {
                                             viewModel.setError("Failed to load example table: ${e.message}")
                                         }
+                                    },
+                                    onDownloadFromArchive = {
+                                        showImportTableMenu = false
+                                        onOpenDownloader()
                                     },
                                 )
                             }

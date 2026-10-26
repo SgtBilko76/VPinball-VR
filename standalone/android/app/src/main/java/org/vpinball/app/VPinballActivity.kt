@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.filterNotNull
@@ -14,9 +15,13 @@ import kotlinx.coroutines.launch
 import org.koin.androidx.viewmodel.ext.android.viewModel
 import org.vpinball.app.ui.VPinballContent
 import org.vpinball.app.ui.screens.landing.LandingScreenViewModel
+import org.vpinball.app.vr.VrShell
 
 class VPinballActivity : ComponentActivity() {
     val viewModel: VPinballModel by viewModel()
+
+    // On Quest the menu is shown on a curved screen in VR instead of a flat 2D window.
+    private val useVrShell = BuildConfig.IS_QUEST
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,25 +34,44 @@ class VPinballActivity : ComponentActivity() {
 
         handleIntent(intent)
 
-        setContent {
-            LaunchedEffect(Unit) { viewModel.startSplashTimer() }
+        if (useVrShell) {
+            VrShell.attach(this) { AppContent() }
+        } else {
+            setContent { AppContent() }
+        }
+    }
 
-            LaunchedEffect(viewModel.showHUD, viewModel.activeTable) {
-                if (viewModel.showHUD && viewModel.activeTable != null) {
-                    val table = viewModel.activeTable!!
+    @Composable
+    private fun AppContent() {
+        LaunchedEffect(Unit) { viewModel.startSplashTimer() }
 
-                    val success = VPinballManager.load(table) { progress, status -> lifecycleScope.launch { viewModel.updateHUD(progress, status) } }
+        LaunchedEffect(viewModel.showHUD, viewModel.activeTable) {
+            if (viewModel.showHUD && viewModel.activeTable != null) {
+                val table = viewModel.activeTable!!
 
-                    if (success) {
-                        val intent = Intent(this@VPinballActivity, VPinballPlayerActivity::class.java)
-                        startActivity(intent)
-                        @Suppress("DEPRECATION") overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
-                    }
+                val success = VPinballManager.load(table) { progress, status -> lifecycleScope.launch { viewModel.updateHUD(progress, status) } }
+
+                if (success) {
+                    // The player runs its own OpenXR session, so the menu's VR session must be gone first.
+                    if (useVrShell) VrShell.pause()
+                    val intent = Intent(this@VPinballActivity, VPinballPlayerActivity::class.java)
+                    startActivity(intent)
+                    @Suppress("DEPRECATION") overridePendingTransition(android.R.anim.fade_in, android.R.anim.fade_out)
                 }
             }
-
-            VPinballContent(viewModel = viewModel)
         }
+
+        VPinballContent(viewModel = viewModel)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (useVrShell) VrShell.resume()
+    }
+
+    override fun onPause() {
+        if (useVrShell) VrShell.pause()
+        super.onPause()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -56,6 +80,7 @@ class VPinballActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (useVrShell) VrShell.detach()
         VPinballManager.setMainActivity(null)
         super.onDestroy()
     }

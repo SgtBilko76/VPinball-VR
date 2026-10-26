@@ -137,6 +137,26 @@ class TableManager(private val context: Context) {
         }
     }
 
+    /**
+     * Imports a downloaded .vpx and places extra files in its table folder.
+     * [extras] maps a path relative to the table folder (e.g. "pinmame/roms/abc.zip") to a local file.
+     */
+    suspend fun importDownloadedTable(vpxFile: File, extras: Map<String, File>): Table? {
+        return withContext(Dispatchers.IO) {
+            val table = importVPX(vpxFile.absolutePath) ?: return@withContext null
+            val tableDir = File(table.path).parent ?: ""
+            for ((relative, file) in extras) {
+                val dest = buildPath(if (tableDir.isNotEmpty()) "$tableDir/$relative" else relative)
+                File(relative).parent?.let { sub -> fileOps.createDirectory(buildPath(if (tableDir.isNotEmpty()) "$tableDir/$sub" else sub)) }
+                if (!fileOps.copy(file.absolutePath, dest)) VPinballManager.log(VPinballLogLevel.WARN, "Failed to copy $relative into table folder")
+            }
+            _tables.value = _tables.value + table
+            saveTables()
+            withContext(Dispatchers.Main) { LandingScreenViewModel.triggerAddTables(listOf(table)) }
+            table
+        }
+    }
+
     suspend fun deleteTable(table: Table, onProgress: ((Int, String) -> Unit)? = null): Boolean {
         return withContext(Dispatchers.IO) {
             val result = performDelete(table, onProgress)

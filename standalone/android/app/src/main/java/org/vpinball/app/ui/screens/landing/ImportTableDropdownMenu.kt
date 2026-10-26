@@ -28,6 +28,7 @@ fun ImportTableDropdownMenu(
     onFiles: () -> Unit,
     onBlankTable: () -> Unit,
     onExampleTable: () -> Unit,
+    onDownloadFromArchive: () -> Unit = {},
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest) {
         Text(
@@ -57,6 +58,13 @@ fun ImportTableDropdownMenu(
                 )
             },
             onClick = onFiles,
+        )
+
+        HorizontalDivider()
+
+        DropdownMenuItem(
+            text = { Text(text = "Download from Archive.org", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface) },
+            onClick = onDownloadFromArchive,
         )
 
         HorizontalDivider()

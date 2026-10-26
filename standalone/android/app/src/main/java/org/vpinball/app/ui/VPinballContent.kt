@@ -16,6 +16,7 @@ import org.vpinball.app.CodeLanguage
 import org.vpinball.app.VPinballModel
 import org.vpinball.app.ui.screens.common.CodeWebViewDialog
 import org.vpinball.app.ui.screens.landing.LandingScreen
+import org.vpinball.app.ui.screens.landing.TableDownloaderScreen
 import org.vpinball.app.ui.screens.loading.LoadingScreen
 import org.vpinball.app.ui.screens.splash.SplashScreen
 import org.vpinball.app.ui.theme.VPinballTheme
@@ -25,14 +26,20 @@ import org.vpinball.app.ui.util.koinActivityViewModel
 fun VPinballContent(viewModel: VPinballModel = koinActivityViewModel()) {
     val context = LocalContext.current
     var codeFile by remember { mutableStateOf<File?>(null) }
+    var showDownloader by remember { mutableStateOf(false) }
 
     VPinballTheme {
         if (viewModel.showSplash) {
             SplashScreen()
         } else {
             Box(modifier = Modifier.fillMaxSize()) {
-                LandingScreen(onViewFile = { file -> codeFile = file })
-
+                LandingScreen(
+                    onViewFile = { file -> codeFile = file },
+                    onOpenDownloader = { showDownloader = true }
+                )
+                if (showDownloader) {
+                    TableDownloaderScreen(onClose = { showDownloader = false })
+                }
                 if (viewModel.showHUD) {
                     viewModel.activeTable?.let { table -> LoadingScreen(table, viewModel.hudProgress, viewModel.hudStatus) }
                 }

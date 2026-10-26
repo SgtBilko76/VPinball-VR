@@ -7,15 +7,18 @@
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
 
     <application>
+        <!-- The menu is immersive: it shows the UI on a curved screen in a black VR space (see VrShell) -->
         <activity android:name="VPinballActivity"
-            android:resizeableActivity="true"
+            android:screenOrientation="landscape"
+            android:resizeableActivity="false"
+            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|layoutDirection|locale|fontScale"
+            tools:replace="android:configChanges"
             tools:node="merge">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-                <category android:name="com.oculus.intent.category.2D" />
+                <category android:name="com.oculus.intent.category.VR" />
             </intent-filter>
-            <layout android:defaultHeight="800dp" android:defaultWidth="1200dp" />
         </activity>
 
         <activity android:name="VPinballPlayerActivity"

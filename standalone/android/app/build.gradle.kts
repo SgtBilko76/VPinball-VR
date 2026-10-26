@@ -176,4 +176,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.koin.compose)
     implementation(libs.koin.compose.navigation)
+
+    implementation(libs.jsoup)
+    implementation(libs.okhttp)
 }

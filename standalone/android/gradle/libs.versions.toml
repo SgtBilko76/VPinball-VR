@@ -12,6 +12,8 @@ kotlinx-serialization = "1.9.0"
 koin = "4.1.1"
 ktfmt = "0.21.0"
 material3 = "1.4.0"
+jsoup = "1.18.3"
+okhttp = "4.11.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -27,6 +29,8 @@ koin-compose = { group = "io.insert-koin", name = "koin-androidx-compose", versi
 koin-compose-navigation = { group = "io.insert-koin", name = "koin-androidx-compose-navigation", version.ref = "koin" }
 ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+jsoup = { group = "org.jsoup", name = "jsoup", version.ref = "jsoup" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
