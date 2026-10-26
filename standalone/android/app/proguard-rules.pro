@@ -1,5 +1,7 @@
 -keep class org.libsdl.app.** { *; }
 -keep class org.vpinball.app.jni.** { *; }
+# VR menu shell: libvrshell calls these static methods by name through JNI
+-keep class org.vpinball.app.vr.VrShell { *; }
 
 -keepclasseswithmembernames class * {
     native <methods>;
