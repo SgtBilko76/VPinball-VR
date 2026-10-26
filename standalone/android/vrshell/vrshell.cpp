@@ -48,6 +48,8 @@ jclass g_cls = nullptr;
 jmethodID g_onSurfaces = nullptr;
 jmethodID g_onPointer = nullptr;
 jmethodID g_onBack = nullptr;
+jmethodID g_onModeChanged = nullptr;
+std::atomic<bool> g_mixedReality {false};
 
 std::thread g_thread;
 std::atomic<bool> g_stop {false};
@@ -79,11 +81,23 @@ struct Shell
    XrSwapchain cursor = XR_NULL_HANDLE;
 
    XrActionSet actionSet = XR_NULL_HANDLE;
-   XrAction aim = XR_NULL_HANDLE, select = XR_NULL_HANDLE, back = XR_NULL_HANDLE, scroll = XR_NULL_HANDLE, haptic = XR_NULL_HANDLE;
+   XrAction aim = XR_NULL_HANDLE, select = XR_NULL_HANDLE, back = XR_NULL_HANDLE, scroll = XR_NULL_HANDLE, haptic = XR_NULL_HANDLE, toggleMode = XR_NULL_HANDLE;
    XrPath hand[2] {};
    XrSpace aimSpace[2] {XR_NULL_HANDLE, XR_NULL_HANDLE};
 
    bool hasFlip = false; // XR_FB_composition_layer_image_layout: Android surfaces arrive upside down
+   bool hasPassthrough = false; // XR_FB_passthrough: mixed reality background
+   XrPassthroughFB passthrough = XR_NULL_HANDLE;
+   XrPassthroughLayerFB passthroughLayer = XR_NULL_HANDLE;
+   bool passthroughRunning = false;
+   PFN_xrCreatePassthroughFB pfnCreatePassthrough = nullptr;
+   PFN_xrDestroyPassthroughFB pfnDestroyPassthrough = nullptr;
+   PFN_xrPassthroughStartFB pfnPassthroughStart = nullptr;
+   PFN_xrPassthroughPauseFB pfnPassthroughPause = nullptr;
+   PFN_xrCreatePassthroughLayerFB pfnCreatePassthroughLayer = nullptr;
+   PFN_xrDestroyPassthroughLayerFB pfnDestroyPassthroughLayer = nullptr;
+   PFN_xrPassthroughLayerResumeFB pfnPassthroughLayerResume = nullptr;
+   PFN_xrPassthroughLayerPauseFB pfnPassthroughLayerPause = nullptr;
 
    XrSessionState state = XR_SESSION_STATE_UNKNOWN;
    bool running = false;
@@ -147,6 +161,9 @@ struct Shell
       hasFlip = hasExtension(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
       if (hasFlip) enabled[enabledCount++] = XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME;
       else LOGE("XR_FB_composition_layer_image_layout missing, menu will be upside down");
+      hasPassthrough = hasExtension(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+      if (hasPassthrough) enabled[enabledCount++] = XR_FB_PASSTHROUGH_EXTENSION_NAME;
+      else LOGE("XR_FB_passthrough missing, mixed reality is not available");
 
       XrInstanceCreateInfoAndroidKHR android {XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
       android.applicationVM = g_vm;
@@ -224,6 +241,7 @@ struct Shell
       if (!createAction("back", "Back", XR_ACTION_TYPE_BOOLEAN_INPUT, back)) return false;
       if (!createAction("scroll", "Scroll", XR_ACTION_TYPE_VECTOR2F_INPUT, scroll)) return false;
       if (!createAction("haptic", "Haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT, haptic)) return false;
+      if (!createAction("toggle_mode", "Switch MR / VR", XR_ACTION_TYPE_BOOLEAN_INPUT, toggleMode)) return false;
 
       {
          const XrActionSuggestedBinding b[] = {
@@ -232,6 +250,7 @@ struct Shell
             {back, path("/user/hand/left/input/y/click")}, {back, path("/user/hand/right/input/b/click")},
             {scroll, path("/user/hand/left/input/thumbstick")}, {scroll, path("/user/hand/right/input/thumbstick")},
             {haptic, path("/user/hand/left/output/haptic")}, {haptic, path("/user/hand/right/output/haptic")},
+            {toggleMode, path("/user/hand/left/input/thumbstick/click")},
          };
          XrInteractionProfileSuggestedBinding s {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
          s.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
@@ -293,6 +312,57 @@ struct Shell
 
       env->CallStaticVoidMethod(g_cls, g_onSurfaces, g_gen, panelSurface, cursorSurface);
       return true;
+   }
+
+   bool initPassthrough()
+   {
+      if (!hasPassthrough) return true;
+#define XR_PFN(name, var) \
+      if (XR_FAILED(xrGetInstanceProcAddr(instance, name, (PFN_xrVoidFunction*)&var)) || !var) { hasPassthrough = false; LOGE("No %s", name); return true; }
+      XR_PFN("xrCreatePassthroughFB", pfnCreatePassthrough)
+      XR_PFN("xrDestroyPassthroughFB", pfnDestroyPassthrough)
+      XR_PFN("xrPassthroughStartFB", pfnPassthroughStart)
+      XR_PFN("xrPassthroughPauseFB", pfnPassthroughPause)
+      XR_PFN("xrCreatePassthroughLayerFB", pfnCreatePassthroughLayer)
+      XR_PFN("xrDestroyPassthroughLayerFB", pfnDestroyPassthroughLayer)
+      XR_PFN("xrPassthroughLayerResumeFB", pfnPassthroughLayerResume)
+      XR_PFN("xrPassthroughLayerPauseFB", pfnPassthroughLayerPause)
+#undef XR_PFN
+      XrPassthroughCreateInfoFB pci {XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
+      if (XR_FAILED(pfnCreatePassthrough(session, &pci, &passthrough))) { hasPassthrough = false; LOGE("xrCreatePassthroughFB failed"); return true; }
+      XrPassthroughLayerCreateInfoFB lci {XR_TYPE_PASSTHROUGH_LAYER_CREATE_INFO_FB};
+      lci.passthrough = passthrough;
+      lci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
+      if (XR_FAILED(pfnCreatePassthroughLayer(session, &lci, &passthroughLayer)))
+      {
+         pfnDestroyPassthrough(passthrough);
+         passthrough = XR_NULL_HANDLE;
+         hasPassthrough = false;
+         LOGE("xrCreatePassthroughLayerFB failed");
+         return true;
+      }
+      applyMode();
+      return true;
+   }
+
+   // Starts or pauses the camera feed to match the selected mode (paused costs no battery).
+   void applyMode()
+   {
+      if (!hasPassthrough) return;
+      const bool want = g_mixedReality.load();
+      if (want == passthroughRunning) return;
+      if (want)
+      {
+         pfnPassthroughStart(passthrough);
+         pfnPassthroughLayerResume(passthroughLayer);
+      }
+      else
+      {
+         pfnPassthroughLayerPause(passthroughLayer);
+         pfnPassthroughPause(passthrough);
+      }
+      passthroughRunning = want;
+      LOGI("Background: %s", want ? "mixed reality" : "virtual reality (black)");
    }
 
    void handleEvents()
@@ -385,6 +455,21 @@ struct Shell
             env->CallStaticVoidMethod(g_cls, g_onBack, g_gen);
       }
 
+      if (hasPassthrough)
+      {
+         XrActionStateGetInfo gi {XR_TYPE_ACTION_STATE_GET_INFO};
+         gi.action = toggleMode;
+         XrActionStateBoolean b {XR_TYPE_ACTION_STATE_BOOLEAN};
+         xrGetActionStateBoolean(session, &gi, &b);
+         if (b.isActive && b.changedSinceLastSync && b.currentState)
+         {
+            g_mixedReality = !g_mixedReality.load();
+            applyMode();
+            buzz(0);
+            env->CallStaticVoidMethod(g_cls, g_onModeChanged, g_gen, g_mixedReality.load() ? JNI_TRUE : JNI_FALSE);
+         }
+      }
+
       float scrollY = 0.f;
       {
          XrActionStateGetInfo gi {XR_TYPE_ACTION_STATE_GET_INFO};
@@ -472,18 +557,28 @@ struct Shell
       quad.pose = cursorPose;
       quad.size = {kCursorSize, kCursorSize};
 
-      const XrCompositionLayerBaseHeader* layers[2] = {(const XrCompositionLayerBaseHeader*)&cyl, (const XrCompositionLayerBaseHeader*)&quad};
+      XrCompositionLayerPassthroughFB pt {XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+      pt.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+      pt.space = XR_NULL_HANDLE;
+      pt.layerHandle = passthroughLayer;
+
+      const XrCompositionLayerBaseHeader* layers[3];
+      uint32_t count = 0;
+      if (passthroughRunning) layers[count++] = (const XrCompositionLayerBaseHeader*)&pt;
+      layers[count++] = (const XrCompositionLayerBaseHeader*)&cyl;
+      if (showCursor) layers[count++] = (const XrCompositionLayerBaseHeader*)&quad;
+
       XrFrameEndInfo ei {XR_TYPE_FRAME_END_INFO};
       ei.displayTime = fs.predictedDisplayTime;
       ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-      ei.layerCount = fs.shouldRender ? (showCursor ? 2 : 1) : 0;
+      ei.layerCount = fs.shouldRender ? count : 0;
       ei.layers = layers;
       xrEndFrame(session, &ei);
    }
 
    void run()
    {
-      if (!initEGL() || !initInstance() || !initSession() || !initActions() || !initSwapchains())
+      if (!initEGL() || !initInstance() || !initSession() || !initActions() || !initPassthrough() || !initSwapchains())
       {
          LOGE("VR shell failed to start");
          return;
@@ -499,6 +594,8 @@ struct Shell
 
    void shutdown()
    {
+      if (passthroughLayer != XR_NULL_HANDLE) pfnDestroyPassthroughLayer(passthroughLayer);
+      if (passthrough != XR_NULL_HANDLE) pfnDestroyPassthrough(passthrough);
       for (XrSpace& s : aimSpace) if (s != XR_NULL_HANDLE) { xrDestroySpace(s); s = XR_NULL_HANDLE; }
       if (cursor != XR_NULL_HANDLE) xrDestroySwapchain(cursor);
       if (panel != XR_NULL_HANDLE) xrDestroySwapchain(panel);
@@ -534,7 +631,7 @@ void threadMain()
 
 extern "C" {
 
-JNIEXPORT void JNICALL Java_org_vpinball_app_vr_VrShell_nativeStart(JNIEnv* env, jclass cls, jobject activity, jint width, jint height, jint gen)
+JNIEXPORT void JNICALL Java_org_vpinball_app_vr_VrShell_nativeStart(JNIEnv* env, jclass cls, jobject activity, jint width, jint height, jint gen, jboolean mixedReality)
 {
    if (g_started) return;
    env->GetJavaVM(&g_vm);
@@ -545,10 +642,12 @@ JNIEXPORT void JNICALL Java_org_vpinball_app_vr_VrShell_nativeStart(JNIEnv* env,
       g_onSurfaces = env->GetStaticMethodID(g_cls, "onSurfaces", "(ILandroid/view/Surface;Landroid/view/Surface;)V");
       g_onPointer = env->GetStaticMethodID(g_cls, "onPointer", "(IIZFFZF)V");
       g_onBack = env->GetStaticMethodID(g_cls, "onBack", "(I)V");
+      g_onModeChanged = env->GetStaticMethodID(g_cls, "onModeChanged", "(IZ)V");
    }
    g_width = width;
    g_height = height;
    g_gen = gen;
+   g_mixedReality = mixedReality == JNI_TRUE;
    g_stop = false;
    g_thread = std::thread(threadMain);
    g_started = true;

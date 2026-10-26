@@ -48,7 +48,10 @@ object VrShell {
     const val HEIGHT = 1080
     private const val DPI = 240
 
-    @JvmStatic private external fun nativeStart(activity: Any, width: Int, height: Int, gen: Int)
+    @JvmStatic private external fun nativeStart(activity: Any, width: Int, height: Int, gen: Int, mixedReality: Boolean)
+
+    private const val PREFS = "vr_shell"
+    private const val KEY_MIXED_REALITY = "mixed_reality"
 
     @JvmStatic private external fun nativeStop()
 
@@ -82,7 +85,8 @@ object VrShell {
         if (started) return
         started = true
         gen++
-        nativeStart(act, WIDTH, HEIGHT, gen)
+        val mixedReality = act.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MIXED_REALITY, false)
+        nativeStart(act, WIDTH, HEIGHT, gen, mixedReality)
     }
 
     fun pause() {
@@ -122,6 +126,14 @@ object VrShell {
     @JvmStatic
     fun onPointer(g: Int, hand: Int, valid: Boolean, u: Float, v: Float, isPressed: Boolean, scroll: Float) {
         main.post { if (g == gen && started) handlePointer(valid, u * WIDTH, v * HEIGHT, isPressed, scroll) }
+    }
+
+    /** Left stick click switched between mixed reality and the black VR space; remember it for next time. */
+    @JvmStatic
+    fun onModeChanged(g: Int, mixedReality: Boolean) {
+        main.post {
+            activity?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit()?.putBoolean(KEY_MIXED_REALITY, mixedReality)?.apply()
+        }
     }
 
     @JvmStatic
