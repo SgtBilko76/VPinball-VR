@@ -9,6 +9,8 @@ This fork builds Visual Pinball X as a **standalone VR app** for **Meta Quest** 
 
 **[Download the latest release](https://github.com/SgtBilko76/VPinball-VR/releases)** - more ports at **[portroyale.online](https://portroyale.online)**.
 
+- **Table downloader** (Quest): pick tables from the Visual Pinball Collection on archive.org, ROM and backglass are installed with them
+- Main menu on a curved screen in VR, left stick click switches between mixed reality and a black VR space
 - Mixed reality (passthrough) switchable from the in-game menu
 - Backglass rebuilt from the desktop backdrop for tables not designed for VR, including EM score reels
 - VR room switching, adjustable table position, angle, size and distance
