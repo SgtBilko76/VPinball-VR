@@ -92,25 +92,17 @@ android {
 
     flavorDimensions += "platform"
     productFlavors {
-        create("quest") {
+        // One APK for Meta Quest and PICO headsets (OpenXR through the Khronos loader, runtime picked by the headset)
+        create("vr") {
             dimension = "platform"
-            buildConfigField("boolean", "IS_QUEST", "true")
-            buildConfigField("boolean", "IS_VR", "true")
-            // Optional display version for Quest builds (e.g. -PquestVersionName="Quest Beta 0.1"), versionCode is unchanged
-            project.findProperty("questVersionName")?.let { versionName = it.toString() }
-        }
-        create("pico") {
-            dimension = "platform"
-            buildConfigField("boolean", "IS_QUEST", "false")
             buildConfigField("boolean", "IS_VR", "true")
             // PICO 4 and Neo 3 run Android 10, the native libraries are built for API 29 (see platforms/android-arm64-v8a/external.sh)
             minSdk = 29
-            // Optional display version for PICO builds (e.g. -PpicoVersionName="PICO Beta 0.1"), versionCode is unchanged
-            project.findProperty("picoVersionName")?.let { versionName = it.toString() }
+            // Optional display version (e.g. -PvrVersionName="Beta 0.40"), versionCode is unchanged
+            project.findProperty("vrVersionName")?.let { versionName = it.toString() }
         }
         create("mobile") {
             dimension = "platform"
-            buildConfigField("boolean", "IS_QUEST", "false")
             buildConfigField("boolean", "IS_VR", "false")
         }
     }

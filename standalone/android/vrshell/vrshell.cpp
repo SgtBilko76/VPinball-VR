@@ -1,14 +1,20 @@
 // VPX VR shell: shows the Android menu UI on a curved screen in an empty (black) VR space.
+// Runs on Meta Quest and PICO from the same APK: it only needs core OpenXR plus
+// XR_KHR_android_create_instance and XR_KHR_opengl_es_enable, which every Android runtime has.
 //
-// The menu is rendered by Android into a Surface that belongs to an OpenXR "Android surface
-// swapchain" and is composited as a cylinder layer. No projection layer is submitted, so
-// everything around the screen stays black. The controller aim ray is intersected with the
-// cylinder and reported to Java, which injects touch / hover / scroll events into the UI.
+// The menu is rendered by Android into a SurfaceTexture owned by this thread's GL context.
+// Each new UI frame (and the pointer cursor) is drawn into a normal GLES swapchain, which is
+// composited as a cylinder layer (XR_KHR_composition_layer_cylinder) or, without it, as a flat
+// quad. No projection layer is submitted, so everything around the screen stays black (or shows
+// the room with XR_FB_passthrough). The controller aim ray is intersected with the screen and
+// reported to Java, which injects touch / hover / scroll events into the UI.
 
 #include <jni.h>
 #include <android/log.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
 #include <unistd.h>
 
 #define XR_USE_PLATFORM_ANDROID
@@ -20,6 +26,7 @@
 #include <cmath>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "VPX-VRShell", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "VPX-VRShell", __VA_ARGS__)
@@ -33,14 +40,17 @@
       } \
    } while (0)
 
+#ifndef XR_BD_CONTROLLER_INTERACTION_EXTENSION_NAME
+#define XR_BD_CONTROLLER_INTERACTION_EXTENSION_NAME "XR_BD_controller_interaction"
+#endif
+
 namespace {
 
 // Screen geometry: a cylinder around the viewer, slightly below eye level.
 constexpr float kRadius = 2.0f;          // metres from the viewer
 constexpr float kCentralAngle = 1.40f;   // ~80 degrees wide
 constexpr float kCenterY = -0.10f;       // metres relative to the head start position
-constexpr float kCursorSize = 0.035f;    // metres
-constexpr int kCursorPx = 128;
+constexpr float kCursorRadiusPx = 13.f;  // cursor dot, in UI pixels
 
 JavaVM* g_vm = nullptr;
 jobject g_activity = nullptr;
@@ -49,6 +59,10 @@ jmethodID g_onSurfaces = nullptr;
 jmethodID g_onPointer = nullptr;
 jmethodID g_onBack = nullptr;
 jmethodID g_onModeChanged = nullptr;
+jmethodID g_onFailed = nullptr;
+jmethodID g_createTexture = nullptr;
+jmethodID g_latchTexture = nullptr;
+jmethodID g_releaseTexture = nullptr;
 std::atomic<bool> g_mixedReality {false};
 
 std::thread g_thread;
@@ -66,6 +80,45 @@ Vec3 rotate(const XrQuaternionf& q, const Vec3& v)
    return {v.x + 2.f * (u.y * t.z - u.z * t.y), v.y + 2.f * (u.z * t.x - u.x * t.z), v.z + 2.f * (u.x * t.y - u.y * t.x)};
 }
 
+const char* kVertexShader = R"(#version 300 es
+out vec2 vUv;
+void main()
+{
+   // Full screen triangle, vUv in GL convention (0,0 = bottom left)
+   vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+   vUv = p;
+   gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+const char* kFragmentShader = R"(#version 300 es
+#extension GL_OES_EGL_image_external_essl3 : require
+precision mediump float;
+uniform samplerExternalOES uTex;
+uniform mat4 uMatrix;   // SurfaceTexture transform
+uniform vec2 uSize;     // UI size in pixels
+uniform vec3 uCursor;   // cursor x, y (pixels, top left origin), radius (0 = hidden)
+uniform float uPressed;
+uniform float uDecode;  // 1 = the swapchain is sRGB: decode the sRGB encoded UI pixels
+in vec2 vUv;
+out vec4 outColor;
+void main()
+{
+   vec3 c = texture(uTex, (uMatrix * vec4(vUv, 0.0, 1.0)).xy).rgb;
+   if (uCursor.z > 0.0)
+   {
+      float d = distance(vec2(vUv.x, 1.0 - vUv.y) * uSize, uCursor.xy);
+      float outer = 1.0 - smoothstep(uCursor.z * 0.95 - 1.0, uCursor.z * 0.95, d);
+      float inner = 1.0 - smoothstep(uCursor.z * 0.72 - 1.0, uCursor.z * 0.72, d);
+      c = mix(c, vec3(0.0), outer * 0.63);
+      c = mix(c, mix(vec3(1.0), vec3(0.902, 0.157, 0.157), uPressed), inner);
+   }
+   if (uDecode > 0.5)
+      c = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+   outColor = vec4(c, 1.0);
+}
+)";
+
 struct Shell
 {
    EGLDisplay dpy = EGL_NO_DISPLAY;
@@ -78,14 +131,27 @@ struct Shell
    XrSession session = XR_NULL_HANDLE;
    XrSpace local = XR_NULL_HANDLE;
    XrSwapchain panel = XR_NULL_HANDLE;
-   XrSwapchain cursor = XR_NULL_HANDLE;
+   std::vector<XrSwapchainImageOpenGLESKHR> panelImages;
+   bool panelValid = false; // an image has been released, so the layer can be submitted
+
+   // UI copy
+   GLuint oesTex = 0, program = 0, fbo = 0, vao = 0;
+   GLint uMatrix = -1, uSize = -1, uCursor = -1, uPressed = -1, uDecode = -1, uTex = -1;
+   bool srgbSwapchain = false;
+   jobject surfaceTexture = nullptr; // global ref
+   jfloatArray matrixArray = nullptr; // global ref
+   float texMatrix[16] {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+   jlong lastFrame = -2;
+   bool lastHit = false, lastPressed = false;
+   float lastU = -1.f, lastV = -1.f;
 
    XrActionSet actionSet = XR_NULL_HANDLE;
    XrAction aim = XR_NULL_HANDLE, select = XR_NULL_HANDLE, back = XR_NULL_HANDLE, scroll = XR_NULL_HANDLE, haptic = XR_NULL_HANDLE, toggleMode = XR_NULL_HANDLE;
    XrPath hand[2] {};
    XrSpace aimSpace[2] {XR_NULL_HANDLE, XR_NULL_HANDLE};
 
-   bool hasFlip = false; // XR_FB_composition_layer_image_layout: Android surfaces arrive upside down
+   bool hasCylinder = false; // XR_KHR_composition_layer_cylinder, else a flat quad
+   bool hasPicoControllers = false; // XR_BD_controller_interaction
    bool hasPassthrough = false; // XR_FB_passthrough: mixed reality background
    XrPassthroughFB passthrough = XR_NULL_HANDLE;
    XrPassthroughLayerFB passthroughLayer = XR_NULL_HANDLE;
@@ -108,6 +174,15 @@ struct Shell
 
    JNIEnv* env = nullptr;
 
+   bool jniFailed(const char* what)
+   {
+      if (!env->ExceptionCheck()) return false;
+      LOGE("Java exception in %s", what);
+      env->ExceptionDescribe();
+      env->ExceptionClear();
+      return true;
+   }
+
    bool initEGL()
    {
       dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -125,16 +200,12 @@ struct Shell
       return true;
    }
 
+   std::vector<XrExtensionProperties> extensions;
+
    bool hasExtension(const char* name)
    {
-      uint32_t n = 0;
-      xrEnumerateInstanceExtensionProperties(nullptr, 0, &n, nullptr);
-      XrExtensionProperties props[256];
-      if (n > 256) n = 256;
-      for (uint32_t i = 0; i < n; i++) props[i] = {XR_TYPE_EXTENSION_PROPERTIES};
-      xrEnumerateInstanceExtensionProperties(nullptr, n, &n, props);
-      for (uint32_t i = 0; i < n; i++)
-         if (strcmp(props[i].extensionName, name) == 0) return true;
+      for (const XrExtensionProperties& p : extensions)
+         if (strcmp(p.extensionName, name) == 0) return true;
       return false;
    }
 
@@ -150,20 +221,23 @@ struct Shell
          initLoader((const XrLoaderInitInfoBaseHeaderKHR*)&li);
       }
 
-      const char* exts[] = {XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME, XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME,
-         XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME, XR_KHR_ANDROID_SURFACE_SWAPCHAIN_EXTENSION_NAME};
-      for (const char* e : exts)
-         if (!hasExtension(e)) { LOGE("Missing OpenXR extension %s", e); return false; }
+      uint32_t n = 0;
+      XR_OK(xrEnumerateInstanceExtensionProperties(nullptr, 0, &n, nullptr));
+      extensions.assign(n, {XR_TYPE_EXTENSION_PROPERTIES});
+      XR_OK(xrEnumerateInstanceExtensionProperties(nullptr, n, &n, extensions.data()));
 
-      const char* enabled[8];
-      uint32_t enabledCount = 0;
-      for (const char* e : exts) enabled[enabledCount++] = e;
-      hasFlip = hasExtension(XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME);
-      if (hasFlip) enabled[enabledCount++] = XR_FB_COMPOSITION_LAYER_IMAGE_LAYOUT_EXTENSION_NAME;
-      else LOGE("XR_FB_composition_layer_image_layout missing, menu will be upside down");
+      std::vector<const char*> enabled;
+      for (const char* e : {XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME, XR_KHR_OPENGL_ES_ENABLE_EXTENSION_NAME})
+      {
+         if (!hasExtension(e)) { LOGE("Missing OpenXR extension %s", e); return false; }
+         enabled.push_back(e);
+      }
+      hasCylinder = hasExtension(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+      if (hasCylinder) enabled.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+      hasPicoControllers = hasExtension(XR_BD_CONTROLLER_INTERACTION_EXTENSION_NAME);
+      if (hasPicoControllers) enabled.push_back(XR_BD_CONTROLLER_INTERACTION_EXTENSION_NAME);
       hasPassthrough = hasExtension(XR_FB_PASSTHROUGH_EXTENSION_NAME);
-      if (hasPassthrough) enabled[enabledCount++] = XR_FB_PASSTHROUGH_EXTENSION_NAME;
-      else LOGE("XR_FB_passthrough missing, mixed reality is not available");
+      if (hasPassthrough) enabled.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
 
       XrInstanceCreateInfoAndroidKHR android {XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
       android.applicationVM = g_vm;
@@ -174,9 +248,14 @@ struct Shell
       strncpy(ci.applicationInfo.applicationName, "Visual Pinball Menu", XR_MAX_APPLICATION_NAME_SIZE - 1);
       strncpy(ci.applicationInfo.engineName, "VPX", XR_MAX_ENGINE_NAME_SIZE - 1);
       ci.applicationInfo.apiVersion = XR_API_VERSION_1_0;
-      ci.enabledExtensionCount = enabledCount;
-      ci.enabledExtensionNames = enabled;
+      ci.enabledExtensionCount = (uint32_t)enabled.size();
+      ci.enabledExtensionNames = enabled.data();
       XR_OK(xrCreateInstance(&ci, &instance));
+
+      XrInstanceProperties ip {XR_TYPE_INSTANCE_PROPERTIES};
+      if (XR_SUCCEEDED(xrGetInstanceProperties(instance, &ip)))
+         LOGI("OpenXR runtime: %s %u.%u.%u", ip.runtimeName, XR_VERSION_MAJOR(ip.runtimeVersion), XR_VERSION_MINOR(ip.runtimeVersion), XR_VERSION_PATCH(ip.runtimeVersion));
+      LOGI("Extensions: cylinder %d, pico controllers %d, passthrough %d", hasCylinder, hasPicoControllers, hasPassthrough);
 
       XrSystemGetInfo sgi {XR_TYPE_SYSTEM_GET_INFO};
       sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
@@ -226,6 +305,18 @@ struct Shell
       return true;
    }
 
+   // Non fatal: a runtime only has to accept the profiles of its own controllers.
+   bool suggest(const char* profile, const XrActionSuggestedBinding* b, uint32_t count)
+   {
+      XrInteractionProfileSuggestedBinding s {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+      s.interactionProfile = path(profile);
+      s.countSuggestedBindings = count;
+      s.suggestedBindings = b;
+      const XrResult r = xrSuggestInteractionProfileBindings(instance, &s);
+      LOGI("Controller profile %s: %s", profile, XR_SUCCEEDED(r) ? "accepted" : "not supported");
+      return XR_SUCCEEDED(r);
+   }
+
    bool initActions()
    {
       hand[0] = path("/user/hand/left");
@@ -243,34 +334,31 @@ struct Shell
       if (!createAction("haptic", "Haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT, haptic)) return false;
       if (!createAction("toggle_mode", "Switch MR / VR", XR_ACTION_TYPE_BOOLEAN_INPUT, toggleMode)) return false;
 
+      // Meta Touch and the PICO controllers have the same buttons: X/Y left, A/B right, sticks, triggers.
+      const XrActionSuggestedBinding touch[] = {
+         {aim, path("/user/hand/left/input/aim/pose")}, {aim, path("/user/hand/right/input/aim/pose")},
+         {select, path("/user/hand/left/input/trigger/value")}, {select, path("/user/hand/right/input/trigger/value")},
+         {back, path("/user/hand/left/input/y/click")}, {back, path("/user/hand/right/input/b/click")},
+         {scroll, path("/user/hand/left/input/thumbstick")}, {scroll, path("/user/hand/right/input/thumbstick")},
+         {haptic, path("/user/hand/left/output/haptic")}, {haptic, path("/user/hand/right/output/haptic")},
+         {toggleMode, path("/user/hand/left/input/thumbstick/click")},
+      };
+      const uint32_t touchCount = sizeof(touch) / sizeof(touch[0]);
+      bool any = suggest("/interaction_profiles/oculus/touch_controller", touch, touchCount);
+      if (hasPicoControllers)
       {
-         const XrActionSuggestedBinding b[] = {
-            {aim, path("/user/hand/left/input/aim/pose")}, {aim, path("/user/hand/right/input/aim/pose")},
-            {select, path("/user/hand/left/input/trigger/value")}, {select, path("/user/hand/right/input/trigger/value")},
-            {back, path("/user/hand/left/input/y/click")}, {back, path("/user/hand/right/input/b/click")},
-            {scroll, path("/user/hand/left/input/thumbstick")}, {scroll, path("/user/hand/right/input/thumbstick")},
-            {haptic, path("/user/hand/left/output/haptic")}, {haptic, path("/user/hand/right/output/haptic")},
-            {toggleMode, path("/user/hand/left/input/thumbstick/click")},
-         };
-         XrInteractionProfileSuggestedBinding s {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-         s.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
-         s.countSuggestedBindings = sizeof(b) / sizeof(b[0]);
-         s.suggestedBindings = b;
-         XR_OK(xrSuggestInteractionProfileBindings(instance, &s));
+         any |= suggest("/interaction_profiles/bytedance/pico4_controller", touch, touchCount);
+         any |= suggest("/interaction_profiles/bytedance/pico4s_controller", touch, touchCount);
+         any |= suggest("/interaction_profiles/bytedance/pico_neo3_controller", touch, touchCount);
       }
-      {
-         const XrActionSuggestedBinding b[] = {
-            {aim, path("/user/hand/left/input/aim/pose")}, {aim, path("/user/hand/right/input/aim/pose")},
-            {select, path("/user/hand/left/input/select/click")}, {select, path("/user/hand/right/input/select/click")},
-            {back, path("/user/hand/left/input/menu/click")}, {back, path("/user/hand/right/input/menu/click")},
-            {haptic, path("/user/hand/left/output/haptic")}, {haptic, path("/user/hand/right/output/haptic")},
-         };
-         XrInteractionProfileSuggestedBinding s {XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-         s.interactionProfile = path("/interaction_profiles/khr/simple_controller");
-         s.countSuggestedBindings = sizeof(b) / sizeof(b[0]);
-         s.suggestedBindings = b;
-         XR_OK(xrSuggestInteractionProfileBindings(instance, &s));
-      }
+      const XrActionSuggestedBinding simple[] = {
+         {aim, path("/user/hand/left/input/aim/pose")}, {aim, path("/user/hand/right/input/aim/pose")},
+         {select, path("/user/hand/left/input/select/click")}, {select, path("/user/hand/right/input/select/click")},
+         {back, path("/user/hand/left/input/menu/click")}, {back, path("/user/hand/right/input/menu/click")},
+         {haptic, path("/user/hand/left/output/haptic")}, {haptic, path("/user/hand/right/output/haptic")},
+      };
+      any |= suggest("/interaction_profiles/khr/simple_controller", simple, sizeof(simple) / sizeof(simple[0]));
+      if (!any) { LOGE("No controller profile accepted"); return false; }
 
       XrSessionActionSetsAttachInfo ai {XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
       ai.countActionSets = 1;
@@ -288,30 +376,94 @@ struct Shell
       return true;
    }
 
+   GLuint compile(GLenum type, const char* src)
+   {
+      GLuint s = glCreateShader(type);
+      glShaderSource(s, 1, &src, nullptr);
+      glCompileShader(s);
+      GLint ok = 0;
+      glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+      if (!ok)
+      {
+         char log[1024] {};
+         glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+         LOGE("Shader compile failed: %s", log);
+         glDeleteShader(s);
+         return 0;
+      }
+      return s;
+   }
+
+   bool initRenderer()
+   {
+      const GLuint vs = compile(GL_VERTEX_SHADER, kVertexShader);
+      const GLuint fs = compile(GL_FRAGMENT_SHADER, kFragmentShader);
+      if (!vs || !fs) return false;
+      program = glCreateProgram();
+      glAttachShader(program, vs);
+      glAttachShader(program, fs);
+      glLinkProgram(program);
+      glDeleteShader(vs);
+      glDeleteShader(fs);
+      GLint ok = 0;
+      glGetProgramiv(program, GL_LINK_STATUS, &ok);
+      if (!ok) { LOGE("Shader link failed"); return false; }
+      uTex = glGetUniformLocation(program, "uTex");
+      uMatrix = glGetUniformLocation(program, "uMatrix");
+      uSize = glGetUniformLocation(program, "uSize");
+      uCursor = glGetUniformLocation(program, "uCursor");
+      uPressed = glGetUniformLocation(program, "uPressed");
+      uDecode = glGetUniformLocation(program, "uDecode");
+      glGenVertexArrays(1, &vao);
+      glGenFramebuffers(1, &fbo);
+
+      glGenTextures(1, &oesTex);
+      glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex);
+      glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+      return glGetError() == GL_NO_ERROR;
+   }
+
    bool initSwapchains()
    {
-      PFN_xrCreateSwapchainAndroidSurfaceKHR createSurfaceSwapchain = nullptr;
-      XR_OK(xrGetInstanceProcAddr(instance, "xrCreateSwapchainAndroidSurfaceKHR", (PFN_xrVoidFunction*)&createSurfaceSwapchain));
+      uint32_t n = 0;
+      XR_OK(xrEnumerateSwapchainFormats(session, 0, &n, nullptr));
+      std::vector<int64_t> formats(n);
+      XR_OK(xrEnumerateSwapchainFormats(session, n, &n, formats.data()));
+      int64_t format = 0;
+      for (int64_t f : formats) if (f == GL_SRGB8_ALPHA8) { format = f; srgbSwapchain = true; }
+      if (!format) for (int64_t f : formats) if (f == GL_RGBA8) format = f;
+      if (!format && n) format = formats[0];
+      LOGI("Panel swapchain format 0x%llx (%s)", (long long)format, srgbSwapchain ? "sRGB" : "linear");
 
       XrSwapchainCreateInfo sc {XR_TYPE_SWAPCHAIN_CREATE_INFO};
       sc.usageFlags = XR_SWAPCHAIN_USAGE_SAMPLED_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
-      // Android surface swapchains: the runtime owns the buffer format, these must be zero.
-      sc.format = 0;
-      sc.sampleCount = 0;
-      sc.faceCount = 0;
-      sc.arraySize = 0;
-      sc.mipCount = 0;
-
-      jobject panelSurface = nullptr, cursorSurface = nullptr;
+      sc.format = format;
+      sc.sampleCount = 1;
       sc.width = g_width;
       sc.height = g_height;
-      XR_OK(createSurfaceSwapchain(session, &sc, &panel, &panelSurface));
-      sc.width = kCursorPx;
-      sc.height = kCursorPx;
-      XR_OK(createSurfaceSwapchain(session, &sc, &cursor, &cursorSurface));
+      sc.faceCount = 1;
+      sc.arraySize = 1;
+      sc.mipCount = 1;
+      XR_OK(xrCreateSwapchain(session, &sc, &panel));
+      XR_OK(xrEnumerateSwapchainImages(panel, 0, &n, nullptr));
+      panelImages.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_ES_KHR});
+      XR_OK(xrEnumerateSwapchainImages(panel, n, &n, (XrSwapchainImageBaseHeader*)panelImages.data()));
 
-      env->CallStaticVoidMethod(g_cls, g_onSurfaces, g_gen, panelSurface, cursorSurface);
-      return true;
+      // The UI is drawn by Android into a SurfaceTexture bound to oesTex (created on this thread, context current).
+      jobject st = env->CallStaticObjectMethod(g_cls, g_createTexture, (jint)oesTex, (jint)g_width, (jint)g_height);
+      if (jniFailed("createPanelTexture") || !st) return false;
+      surfaceTexture = env->NewGlobalRef(st);
+      env->DeleteLocalRef(st);
+      jfloatArray m = env->NewFloatArray(16);
+      matrixArray = (jfloatArray)env->NewGlobalRef(m);
+      env->DeleteLocalRef(m);
+
+      env->CallStaticVoidMethod(g_cls, g_onSurfaces, g_gen, surfaceTexture);
+      return !jniFailed("onSurfaces");
    }
 
    bool initPassthrough()
@@ -419,12 +571,46 @@ struct Shell
       xrApplyHapticFeedback(session, &hi, (const XrHapticBaseHeader*)&v);
    }
 
-   // Returns true and fills the cursor pose when the active controller points at the screen.
-   bool updateInput(XrTime time, XrPosef& cursorPose)
+   // Screen size in metres: the cylinder's arc length, or the same width for the flat fallback.
+   float screenWidth() const { return kRadius * kCentralAngle; }
+   float screenHeight() const { return screenWidth() * (float)g_height / (float)g_width; }
+
+   // Intersects the aim ray with the screen; returns true with (u, v) in [0, 1] (top left origin) on a hit.
+   bool hitTest(const Vec3& o, const Vec3& d, float& u, float& v)
+   {
+      if (hasCylinder)
+      {
+         // Vertical cylinder around the origin (we are inside it).
+         const float a = d.x * d.x + d.z * d.z;
+         const float b = 2.f * (o.x * d.x + o.z * d.z);
+         const float c = o.x * o.x + o.z * o.z - kRadius * kRadius;
+         const float disc = b * b - 4.f * a * c;
+         if (a <= 1e-6f || disc < 0.f) return false;
+         const float t = (-b + std::sqrt(disc)) / (2.f * a);
+         if (t <= 0.f) return false;
+         const Vec3 p {o.x + t * d.x, o.y + t * d.y, o.z + t * d.z};
+         u = 0.5f + std::atan2(p.x, -p.z) / kCentralAngle;
+         v = 0.5f - (p.y - kCenterY) / screenHeight();
+      }
+      else
+      {
+         // Flat quad facing the viewer at z = -radius.
+         if (d.z >= -1e-6f) return false;
+         const float t = (-kRadius - o.z) / d.z;
+         if (t <= 0.f) return false;
+         u = 0.5f + (o.x + t * d.x) / screenWidth();
+         v = 0.5f - (o.y + t * d.y - kCenterY) / screenHeight();
+      }
+      return u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f;
+   }
+
+   // Polls the controllers, reports the pointer to Java and returns whether it is on the screen.
+   bool updateInput(XrTime time, float& u, float& v)
    {
       if (state != XR_SESSION_STATE_FOCUSED)
       {
          env->CallStaticVoidMethod(g_cls, g_onPointer, g_gen, activeHand, JNI_FALSE, 0.f, 0.f, JNI_FALSE, 0.f);
+         jniFailed("onPointer");
          return false;
       }
 
@@ -452,7 +638,10 @@ struct Shell
          XrActionStateBoolean b {XR_TYPE_ACTION_STATE_BOOLEAN};
          xrGetActionStateBoolean(session, &gi, &b);
          if (b.isActive && b.changedSinceLastSync && b.currentState)
+         {
             env->CallStaticVoidMethod(g_cls, g_onBack, g_gen);
+            jniFailed("onBack");
+         }
       }
 
       if (hasPassthrough)
@@ -467,6 +656,7 @@ struct Shell
             applyMode();
             buzz(0);
             env->CallStaticVoidMethod(g_cls, g_onModeChanged, g_gen, g_mixedReality.load() ? JNI_TRUE : JNI_FALSE);
+            jniFailed("onModeChanged");
          }
       }
 
@@ -475,50 +665,74 @@ struct Shell
          XrActionStateGetInfo gi {XR_TYPE_ACTION_STATE_GET_INFO};
          gi.action = scroll;
          gi.subactionPath = hand[activeHand];
-         XrActionStateVector2f v {XR_TYPE_ACTION_STATE_VECTOR2F};
-         xrGetActionStateVector2f(session, &gi, &v);
-         if (v.isActive && std::fabs(v.currentState.y) > 0.2f) scrollY = v.currentState.y;
+         XrActionStateVector2f s {XR_TYPE_ACTION_STATE_VECTOR2F};
+         xrGetActionStateVector2f(session, &gi, &s);
+         if (s.isActive && std::fabs(s.currentState.y) > 0.2f) scrollY = s.currentState.y;
       }
 
       bool hit = false;
-      float u = 0.f, v = 0.f;
       XrSpaceLocation loc {XR_TYPE_SPACE_LOCATION};
       if (XR_SUCCEEDED(xrLocateSpace(aimSpace[activeHand], local, time, &loc))
          && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
       {
          const Vec3 o {loc.pose.position.x, loc.pose.position.y, loc.pose.position.z};
-         const Vec3 d = rotate(loc.pose.orientation, {0.f, 0.f, -1.f});
-         // Intersect with the vertical cylinder around the origin (we are inside it).
-         const float a = d.x * d.x + d.z * d.z;
-         const float b = 2.f * (o.x * d.x + o.z * d.z);
-         const float c = o.x * o.x + o.z * o.z - kRadius * kRadius;
-         const float disc = b * b - 4.f * a * c;
-         if (a > 1e-6f && disc >= 0.f)
-         {
-            const float t = (-b + std::sqrt(disc)) / (2.f * a);
-            if (t > 0.f)
-            {
-               const Vec3 p {o.x + t * d.x, o.y + t * d.y, o.z + t * d.z};
-               const float theta = std::atan2(p.x, -p.z);
-               const float aspect = (float)g_width / (float)g_height;
-               const float height = kRadius * kCentralAngle / aspect;
-               u = 0.5f + theta / kCentralAngle;
-               v = 0.5f - (p.y - kCenterY) / height;
-               if (u >= 0.f && u <= 1.f && v >= 0.f && v <= 1.f)
-               {
-                  hit = true;
-                  const float k = (kRadius - 0.01f) / kRadius;
-                  cursorPose.position = {p.x * k, p.y, p.z * k};
-                  const float yaw = -theta;
-                  cursorPose.orientation = {0.f, std::sin(yaw * 0.5f), 0.f, std::cos(yaw * 0.5f)};
-               }
-            }
-         }
+         hit = hitTest(o, rotate(loc.pose.orientation, {0.f, 0.f, -1.f}), u, v);
       }
 
       env->CallStaticVoidMethod(g_cls, g_onPointer, g_gen, activeHand, hit ? JNI_TRUE : JNI_FALSE, u, v,
          pressed[activeHand] ? JNI_TRUE : JNI_FALSE, scrollY);
+      jniFailed("onPointer");
       return hit;
+   }
+
+   // Copies the newest UI frame and the cursor into the panel swapchain when anything changed.
+   void updatePanel(bool hit, float u, float v)
+   {
+      const jlong frameId = env->CallStaticLongMethod(g_cls, g_latchTexture, surfaceTexture, matrixArray);
+      if (jniFailed("latchPanelTexture")) return;
+      const bool isPressed = hit && pressed[activeHand];
+      const bool cursorMoved = hit != lastHit || isPressed != lastPressed
+         || (hit && (std::fabs(u - lastU) * g_width > 0.25f || std::fabs(v - lastV) * g_height > 0.25f));
+      if (panelValid && frameId == lastFrame && !cursorMoved) return;
+      env->GetFloatArrayRegion(matrixArray, 0, 16, texMatrix);
+
+      uint32_t index = 0;
+      XrSwapchainImageAcquireInfo ai {XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+      if (XR_FAILED(xrAcquireSwapchainImage(panel, &ai, &index))) return;
+      XrSwapchainImageWaitInfo wi {XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+      wi.timeout = XR_INFINITE_DURATION;
+      if (XR_FAILED(xrWaitSwapchainImage(panel, &wi))) return;
+
+      glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, panelImages[index].image, 0);
+      glViewport(0, 0, g_width, g_height);
+      glDisable(GL_BLEND);
+      glDisable(GL_DEPTH_TEST);
+      glDisable(GL_SCISSOR_TEST);
+      glUseProgram(program);
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_EXTERNAL_OES, oesTex);
+      glUniform1i(uTex, 0);
+      glUniformMatrix4fv(uMatrix, 1, GL_FALSE, texMatrix);
+      glUniform2f(uSize, (float)g_width, (float)g_height);
+      glUniform3f(uCursor, u * g_width, v * g_height, hit ? kCursorRadiusPx : 0.f);
+      glUniform1f(uPressed, isPressed ? 1.f : 0.f);
+      glUniform1f(uDecode, srgbSwapchain ? 1.f : 0.f);
+      glBindVertexArray(vao);
+      glDrawArrays(GL_TRIANGLES, 0, 3);
+      glBindVertexArray(0);
+      glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glFlush();
+
+      XrSwapchainImageReleaseInfo ri {XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+      if (XR_SUCCEEDED(xrReleaseSwapchainImage(panel, &ri))) panelValid = true;
+      lastFrame = frameId;
+      lastHit = hit;
+      lastPressed = isPressed;
+      lastU = u;
+      lastV = v;
    }
 
    void frame()
@@ -529,14 +743,11 @@ struct Shell
       XrFrameBeginInfo bi {XR_TYPE_FRAME_BEGIN_INFO};
       if (XR_FAILED(xrBeginFrame(session, &bi))) return;
 
-      XrPosef cursorPose {};
-      const bool showCursor = updateInput(fs.predictedDisplayTime, cursorPose);
-
-      XrCompositionLayerImageLayoutFB flip {XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
-      flip.flags = XR_COMPOSITION_LAYER_IMAGE_LAYOUT_VERTICAL_FLIP_BIT_FB;
+      float u = 0.f, v = 0.f;
+      const bool hit = updateInput(fs.predictedDisplayTime, u, v);
+      updatePanel(hit, u, v);
 
       XrCompositionLayerCylinderKHR cyl {XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
-      if (hasFlip) cyl.next = &flip;
       cyl.space = local;
       cyl.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
       cyl.subImage.swapchain = panel;
@@ -549,24 +760,22 @@ struct Shell
       cyl.aspectRatio = (float)g_width / (float)g_height;
 
       XrCompositionLayerQuad quad {XR_TYPE_COMPOSITION_LAYER_QUAD};
-      quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
       quad.space = local;
       quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-      quad.subImage.swapchain = cursor;
-      quad.subImage.imageRect = {{0, 0}, {kCursorPx, kCursorPx}};
-      quad.pose = cursorPose;
-      quad.size = {kCursorSize, kCursorSize};
+      quad.subImage = cyl.subImage;
+      quad.pose.orientation.w = 1.f;
+      quad.pose.position = {0.f, kCenterY, -kRadius};
+      quad.size = {screenWidth(), screenHeight()};
 
       XrCompositionLayerPassthroughFB pt {XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
       pt.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
       pt.space = XR_NULL_HANDLE;
       pt.layerHandle = passthroughLayer;
 
-      const XrCompositionLayerBaseHeader* layers[3];
+      const XrCompositionLayerBaseHeader* layers[2];
       uint32_t count = 0;
       if (passthroughRunning) layers[count++] = (const XrCompositionLayerBaseHeader*)&pt;
-      layers[count++] = (const XrCompositionLayerBaseHeader*)&cyl;
-      if (showCursor) layers[count++] = (const XrCompositionLayerBaseHeader*)&quad;
+      if (panelValid) layers[count++] = hasCylinder ? (const XrCompositionLayerBaseHeader*)&cyl : (const XrCompositionLayerBaseHeader*)&quad;
 
       XrFrameEndInfo ei {XR_TYPE_FRAME_END_INFO};
       ei.displayTime = fs.predictedDisplayTime;
@@ -578,12 +787,14 @@ struct Shell
 
    void run()
    {
-      if (!initEGL() || !initInstance() || !initSession() || !initActions() || !initPassthrough() || !initSwapchains())
+      if (!initEGL() || !initInstance() || !initSession() || !initActions() || !initPassthrough() || !initRenderer() || !initSwapchains())
       {
          LOGE("VR shell failed to start");
+         env->CallStaticVoidMethod(g_cls, g_onFailed, g_gen);
+         jniFailed("onFailed");
          return;
       }
-      LOGI("VR shell started (%dx%d)", g_width, g_height);
+      LOGI("VR shell started (%dx%d, %s)", g_width, g_height, hasCylinder ? "curved screen" : "flat screen");
       while (!g_stop.load() && !exitRequested)
       {
          handleEvents();
@@ -594,10 +805,17 @@ struct Shell
 
    void shutdown()
    {
+      if (surfaceTexture)
+      {
+         env->CallStaticVoidMethod(g_cls, g_releaseTexture, surfaceTexture);
+         jniFailed("releasePanelTexture");
+         env->DeleteGlobalRef(surfaceTexture);
+         surfaceTexture = nullptr;
+      }
+      if (matrixArray) { env->DeleteGlobalRef(matrixArray); matrixArray = nullptr; }
       if (passthroughLayer != XR_NULL_HANDLE) pfnDestroyPassthroughLayer(passthroughLayer);
       if (passthrough != XR_NULL_HANDLE) pfnDestroyPassthrough(passthrough);
       for (XrSpace& s : aimSpace) if (s != XR_NULL_HANDLE) { xrDestroySpace(s); s = XR_NULL_HANDLE; }
-      if (cursor != XR_NULL_HANDLE) xrDestroySwapchain(cursor);
       if (panel != XR_NULL_HANDLE) xrDestroySwapchain(panel);
       if (local != XR_NULL_HANDLE) xrDestroySpace(local);
       if (actionSet != XR_NULL_HANDLE) xrDestroyActionSet(actionSet);
@@ -605,6 +823,13 @@ struct Shell
       if (instance != XR_NULL_HANDLE) xrDestroyInstance(instance);
       if (dpy != EGL_NO_DISPLAY)
       {
+         if (ctx != EGL_NO_CONTEXT)
+         {
+            if (oesTex) glDeleteTextures(1, &oesTex);
+            if (fbo) glDeleteFramebuffers(1, &fbo);
+            if (vao) glDeleteVertexArrays(1, &vao);
+            if (program) glDeleteProgram(program);
+         }
          eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
          if (pbuf != EGL_NO_SURFACE) eglDestroySurface(dpy, pbuf);
          if (ctx != EGL_NO_CONTEXT) eglDestroyContext(dpy, ctx);
@@ -639,10 +864,14 @@ JNIEXPORT void JNICALL Java_org_vpinball_app_vr_VrShell_nativeStart(JNIEnv* env,
    if (!g_cls)
    {
       g_cls = (jclass)env->NewGlobalRef(cls);
-      g_onSurfaces = env->GetStaticMethodID(g_cls, "onSurfaces", "(ILandroid/view/Surface;Landroid/view/Surface;)V");
+      g_onSurfaces = env->GetStaticMethodID(g_cls, "onSurfaces", "(ILandroid/graphics/SurfaceTexture;)V");
       g_onPointer = env->GetStaticMethodID(g_cls, "onPointer", "(IIZFFZF)V");
       g_onBack = env->GetStaticMethodID(g_cls, "onBack", "(I)V");
       g_onModeChanged = env->GetStaticMethodID(g_cls, "onModeChanged", "(IZ)V");
+      g_onFailed = env->GetStaticMethodID(g_cls, "onFailed", "(I)V");
+      g_createTexture = env->GetStaticMethodID(g_cls, "createPanelTexture", "(III)Landroid/graphics/SurfaceTexture;");
+      g_latchTexture = env->GetStaticMethodID(g_cls, "latchPanelTexture", "(Landroid/graphics/SurfaceTexture;[F)J");
+      g_releaseTexture = env->GetStaticMethodID(g_cls, "releasePanelTexture", "(Landroid/graphics/SurfaceTexture;)V");
    }
    g_width = width;
    g_height = height;

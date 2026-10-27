@@ -240,6 +240,8 @@ VRDevice::VRDevice(const Settings& settings)
          m_convertTimespecTimeExtensionSupported = EnableExtensionIfSupported(XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME);
       #endif
       m_passthroughExtensionSupported = EnableExtensionIfSupported(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+      // PICO: the bytedance/* interaction profiles suggested in XRInputHandler are only accepted with this extension
+      EnableExtensionIfSupported("XR_BD_controller_interaction");
       m_displayRefreshRateExtensionSupported = EnableExtensionIfSupported(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
       m_displayRefreshRateMode = settings.GetPlayerVR_DisplayRefreshRate();
       #ifdef DEBUG

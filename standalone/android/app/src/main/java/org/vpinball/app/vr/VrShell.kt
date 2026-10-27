@@ -4,11 +4,10 @@ import android.annotation.SuppressLint
 import android.app.Presentation
 import android.content.Context
 import android.content.ContextWrapper
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.PorterDuff
+import android.graphics.SurfaceTexture
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -24,6 +23,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.WindowMetrics
 import androidx.activity.ComponentActivity
+import androidx.annotation.RequiresApi
 import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.Composable
@@ -32,13 +32,16 @@ import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Shows the app UI on a curved screen in an empty, black VR space (Quest).
+ * Shows the app UI on a curved screen in an empty, black VR space (Meta Quest and PICO).
  *
- * The native side (libvrshell.so) runs an OpenXR session that composites one cylinder layer whose
- * content comes from an Android Surface. Here that Surface backs a private VirtualDisplay hosting a
- * Presentation with the normal Compose UI. Controller input arrives as (u, v) hits on the screen and
+ * The native side (libvrshell.so) runs an OpenXR session (standard OpenXR only, through the Khronos
+ * loader) that composites one cylinder layer (a flat quad where cylinders are missing). The UI is drawn
+ * into a SurfaceTexture owned by the native GL context: its Surface backs a private VirtualDisplay
+ * hosting a Presentation with the normal Compose UI, and every new frame is copied into the layer's
+ * swapchain together with the pointer cursor. Controller input arrives as (u, v) hits on the screen and
  * is turned into touch, hover, scroll and back key events.
  */
 @SuppressLint("StaticFieldLeak")
@@ -60,7 +63,9 @@ object VrShell {
     private var content: (@Composable () -> Unit)? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var presentation: MenuPresentation? = null
-    private var cursorSurface: Surface? = null
+    private var panelSurface: Surface? = null
+    private var onFailed: (() -> Unit)? = null
+    private val frames = AtomicLong()
     private var started = false
     private var gen = 0
 
@@ -72,12 +77,19 @@ object VrShell {
     private var downTime = 0L
     private var touchTarget: View? = null
     private var hoverTarget: View? = null
-    private var cursorDrawnPressed: Boolean? = null
 
-    fun attach(activity: ComponentActivity, content: @Composable () -> Unit) {
-        System.loadLibrary("vrshell")
+    /** [onFailed] runs on the main thread when the VR menu can't run on this headset: show the flat UI instead. */
+    fun attach(activity: ComponentActivity, onFailed: () -> Unit, content: @Composable () -> Unit) {
+        try {
+            System.loadLibrary("vrshell")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.e(TAG, "VR shell library not available, using the flat menu: ${e.message}")
+            onFailed()
+            return
+        }
         this.activity = activity
         this.content = content
+        this.onFailed = onFailed
     }
 
     fun resume() {
@@ -95,8 +107,9 @@ object VrShell {
         gen++
         endTouch()
         virtualDisplay?.surface = null
-        cursorSurface = null
-        nativeStop()
+        panelSurface?.release()
+        panelSurface = null
+        nativeStop() // releases the SurfaceTexture on the GL thread
     }
 
     fun detach() {
@@ -108,18 +121,60 @@ object VrShell {
         windows.clear()
         activity = null
         content = null
+        onFailed = null
     }
 
     // ---- Callbacks from the native OpenXR thread ----
 
+    /** Called on the GL thread with its context current: the UI frames land in [texId] (GL_TEXTURE_EXTERNAL_OES). */
     @JvmStatic
-    fun onSurfaces(g: Int, panel: Surface, cursor: Surface) {
+    fun createPanelTexture(texId: Int, width: Int, height: Int): SurfaceTexture {
+        frames.set(0)
+        return SurfaceTexture(texId).apply {
+            setDefaultBufferSize(width, height)
+            setOnFrameAvailableListener({ frames.incrementAndGet() }, main)
+        }
+    }
+
+    /** GL thread, every frame: latches the newest UI frame and returns a counter that changes with each new frame. */
+    @JvmStatic
+    fun latchPanelTexture(st: SurfaceTexture, matrix: FloatArray): Long {
+        val n = frames.get()
+        return try {
+            st.updateTexImage()
+            st.getTransformMatrix(matrix)
+            n
+        } catch (e: RuntimeException) {
+            -1L
+        }
+    }
+
+    @JvmStatic
+    fun releasePanelTexture(st: SurfaceTexture) {
+        st.setOnFrameAvailableListener(null)
+        st.release()
+    }
+
+    @JvmStatic
+    fun onSurfaces(g: Int, panel: SurfaceTexture) {
         main.post {
             if (g != gen || !started) return@post
-            showPanel(panel)
-            cursorSurface = cursor
-            cursorDrawnPressed = null
-            drawCursor(false)
+            panelSurface?.release()
+            val surface = Surface(panel)
+            panelSurface = surface
+            showPanel(surface)
+        }
+    }
+
+    /** The OpenXR runtime can't run the VR menu: fall back to the flat UI. */
+    @JvmStatic
+    fun onFailed(g: Int) {
+        main.post {
+            if (g != gen || !started) return@post
+            Log.e(TAG, "VR menu failed to start, using the flat menu")
+            val callback = onFailed
+            detach()
+            callback?.invoke()
         }
     }
 
@@ -163,26 +218,6 @@ object VrShell {
         virtualDisplay = display
         presentation = MenuPresentation(act, display.display).also { it.show() }
         Log.i(TAG, "Menu shown on virtual display ${display.display.displayId}")
-    }
-
-    private fun drawCursor(isPressed: Boolean) {
-        if (cursorDrawnPressed == isPressed) return
-        val surface = cursorSurface ?: return
-        try {
-            val canvas = surface.lockCanvas(null)
-            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-            val c = canvas.width / 2f
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-            paint.style = Paint.Style.FILL
-            paint.color = Color.argb(160, 0, 0, 0)
-            canvas.drawCircle(c, c, c * 0.95f, paint)
-            paint.color = if (isPressed) Color.rgb(230, 40, 40) else Color.WHITE
-            canvas.drawCircle(c, c, c * 0.72f, paint)
-            surface.unlockCanvasAndPost(canvas)
-            cursorDrawnPressed = isPressed
-        } catch (e: Exception) {
-            Log.w(TAG, "Cursor draw failed: ${e.message}")
-        }
     }
 
     // ---- Input ----
@@ -241,7 +276,6 @@ object VrShell {
     }
 
     private fun handlePointer(valid: Boolean, x: Float, y: Float, isPressed: Boolean, scroll: Float) {
-        drawCursor(isPressed && valid)
         val now = SystemClock.uptimeMillis()
 
         if (pressed) {
@@ -392,7 +426,9 @@ private class TrackingWindowManager(private val base: WindowManager) : WindowMan
         base.removeViewImmediate(view)
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     override fun getCurrentWindowMetrics(): WindowMetrics = base.currentWindowMetrics
 
+    @RequiresApi(Build.VERSION_CODES.R)
     override fun getMaximumWindowMetrics(): WindowMetrics = base.maximumWindowMetrics
 }

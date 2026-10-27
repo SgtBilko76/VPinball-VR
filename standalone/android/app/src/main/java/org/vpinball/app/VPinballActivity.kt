@@ -20,8 +20,9 @@ import org.vpinball.app.vr.VrShell
 class VPinballActivity : ComponentActivity() {
     val viewModel: VPinballModel by viewModel()
 
-    // On Quest the menu is shown on a curved screen in VR instead of a flat 2D window.
-    private val useVrShell = BuildConfig.IS_QUEST
+    // On the headsets (Meta Quest and PICO) the menu is shown on a curved screen in VR instead of a flat 2D window.
+    // Falls back to the flat window when the headset's OpenXR runtime can't run the VR menu.
+    private var useVrShell = BuildConfig.IS_VR
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -35,7 +36,10 @@ class VPinballActivity : ComponentActivity() {
         handleIntent(intent)
 
         if (useVrShell) {
-            VrShell.attach(this) { AppContent() }
+            VrShell.attach(this, onFailed = {
+                useVrShell = false
+                setContent { AppContent() }
+            }) { AppContent() }
         } else {
             setContent { AppContent() }
         }

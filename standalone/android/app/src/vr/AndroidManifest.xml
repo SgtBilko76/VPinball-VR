@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One APK for Meta Quest and PICO: OpenXR through the Khronos loader, which finds the
+     headset's runtime (Meta or PICO) through the runtime broker. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- required=false: PICO does not list these features, and sideloading must not be filtered -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="false" />
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+
+    <!-- OpenXR runtime access (Khronos loader) -->
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+
+    <!-- Let the Khronos loader find the runtime through the broker (Android 11+ package visibility) -->
+    <queries>
+        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+        <intent>
+            <action android:name="org.khronos.openxr.OpenXRRuntimeService" />
+        </intent>
+        <intent>
+            <action android:name="org.khronos.openxr.OpenXRApiLayerService" />
+        </intent>
+    </queries>
+
+    <application>
+        <!-- PICO OS: this is a VR application (the menu and the game both run in OpenXR) -->
+        <meta-data android:name="pvr.app.type" android:value="vr" />
+
+        <!-- The menu is immersive on both makes: it shows the UI on a curved screen in VR (see VrShell) -->
+        <activity android:name="VPinballActivity"
+            android:screenOrientation="landscape"
+            android:resizeableActivity="false"
+            android:configChanges="density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|uiMode|layoutDirection|locale|fontScale"
+            tools:replace="android:configChanges"
+            tools:node="merge">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+                <category android:name="com.picovr.intent.category.VR" />
+            </intent-filter>
+        </activity>
+
+        <activity android:name="VPinballPlayerActivity"
+            tools:node="merge">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+                <category android:name="com.picovr.intent.category.VR" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
