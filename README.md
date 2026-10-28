@@ -18,6 +18,10 @@ This fork builds Visual Pinball X as a **standalone VR app** for **Meta Quest** 
 
 Table script overrides that switch on the VR room of tables shipping with it disabled are in [quest-overrides](quest-overrides).
 
+## Controls
+
+![Visual Pinball X VR controller mapping](docs/controls.webp)
+
 Everything below is the upstream Visual Pinball documentation.
 
 *An open source pinball table editor and simulator.*
