@@ -5,6 +5,8 @@
 
 ## Standalone VR port for Meta Quest and PICO
 
+**Download, install guide, controls and pictures: [portroyale.online/vpinball.html](https://portroyale.online/vpinball.html)**
+
 This fork builds Visual Pinball X as a **standalone VR app** for **Meta Quest** (tested on Quest 3) and **PICO** headsets (OpenXR, Vulkan). **One APK for both**: it uses the Khronos OpenXR loader, so the headset's own runtime takes over. No PC, no streaming: tables and ROMs live on the headset.
 
 **[Download the latest release](https://github.com/SgtBilko76/VPinball-VR/releases)** - more ports at **[portroyale.online](https://portroyale.online)**.
