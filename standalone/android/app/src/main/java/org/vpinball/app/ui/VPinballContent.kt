@@ -1,6 +1,5 @@
 package org.vpinball.app.ui
 
-import android.content.Intent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -9,8 +8,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.core.content.FileProvider
 import java.io.File
 import org.vpinball.app.CodeLanguage
 import org.vpinball.app.VPinballModel
@@ -21,10 +18,11 @@ import org.vpinball.app.ui.screens.loading.LoadingScreen
 import org.vpinball.app.ui.screens.splash.SplashScreen
 import org.vpinball.app.ui.theme.VPinballTheme
 import org.vpinball.app.ui.util.koinActivityViewModel
+import org.vpinball.app.ui.util.rememberShareFile
 
 @Composable
 fun VPinballContent(viewModel: VPinballModel = koinActivityViewModel()) {
-    val context = LocalContext.current
+    val shareFile = rememberShareFile()
     var codeFile by remember { mutableStateOf<File?>(null) }
     var showDownloader by remember { mutableStateOf(false) }
 
@@ -50,16 +48,7 @@ fun VPinballContent(viewModel: VPinballModel = koinActivityViewModel()) {
                     file = it,
                     canClear = CodeLanguage.fromFile(it) == CodeLanguage.LOG,
                     onDismissRequest = { codeFile = null },
-                    onShare = {
-                        val fileUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", it)
-                        val shareIntent =
-                            Intent(Intent.ACTION_SEND).apply {
-                                type = "application/octet-stream"
-                                putExtra(Intent.EXTRA_STREAM, fileUri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            }
-                        context.startActivity(Intent.createChooser(shareIntent, "Share File: $it"))
-                    },
+                    onShare = { shareFile(it) },
                 )
             }
         }

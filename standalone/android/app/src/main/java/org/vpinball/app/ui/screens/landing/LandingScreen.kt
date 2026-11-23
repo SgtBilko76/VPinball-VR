@@ -1,6 +1,5 @@
 package org.vpinball.app.ui.screens.landing
 
-import android.content.Intent
 import android.content.res.Configuration
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -57,7 +56,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.chrisbanes.haze.HazeState
@@ -83,6 +81,7 @@ import org.vpinball.app.ui.theme.VPinballTheme
 import org.vpinball.app.ui.theme.VpxDarkYellow
 import org.vpinball.app.ui.theme.VpxRed
 import org.vpinball.app.ui.util.koinActivityViewModel
+import org.vpinball.app.ui.util.rememberShareFile
 import org.vpinball.app.util.FileUtils
 import org.vpinball.app.util.hasScriptFile
 import org.vpinball.app.vr.AlertDialog
@@ -97,6 +96,7 @@ fun LandingScreen(
     viewModel: LandingScreenViewModel = koinViewModel(),
 ) {
     val context = LocalContext.current
+    val shareFile = rememberShareFile()
     val focusManager = LocalFocusManager.current
     LaunchedEffect(Unit) { viewModel.initialize(vpinballModel) }
 
@@ -431,16 +431,7 @@ fun LandingScreen(
                                     onComplete = { path ->
                                         showProgress = false
 
-                                        val file = File(path)
-                                        val fileUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-                                        val shareIntent =
-                                            Intent(Intent.ACTION_SEND).apply {
-                                                type = "application/octet-stream"
-                                                putExtra(Intent.EXTRA_STREAM, fileUri)
-                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                            }
-
-                                        context.startActivity(Intent.createChooser(shareIntent, "Share File: ${file.name}"))
+                                        shareFile(File(path))
                                     },
                                     onError = { showProgress = false },
                                 )
