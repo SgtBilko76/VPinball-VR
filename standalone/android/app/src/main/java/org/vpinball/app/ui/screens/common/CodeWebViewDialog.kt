@@ -48,7 +48,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
@@ -61,6 +60,7 @@ import kotlinx.coroutines.launch
 import org.vpinball.app.CodeLanguage
 import org.vpinball.app.R
 import org.vpinball.app.ui.theme.VpxRed
+import org.vpinball.app.vr.Dialog
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

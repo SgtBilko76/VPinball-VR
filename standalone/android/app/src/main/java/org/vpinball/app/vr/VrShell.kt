@@ -363,7 +363,11 @@ object VrShell {
     @Composable
     internal fun Content() {
         val act = activity ?: return
-        CompositionLocalProvider(LocalActivityResultRegistryOwner provides act, LocalOnBackPressedDispatcherOwner provides act) {
+        CompositionLocalProvider(
+            LocalActivityResultRegistryOwner provides act,
+            LocalOnBackPressedDispatcherOwner provides act,
+            LocalVrShell provides true,
+        ) {
             content?.invoke()
         }
     }
