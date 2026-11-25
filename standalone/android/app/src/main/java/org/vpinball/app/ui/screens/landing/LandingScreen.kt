@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,7 +30,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.rememberTextFieldState
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -77,7 +77,6 @@ import org.vpinball.app.TableManager
 import org.vpinball.app.TableViewMode
 import org.vpinball.app.VPinballModel
 import org.vpinball.app.ui.screens.common.ProgressOverlay
-import org.vpinball.app.ui.screens.settings.SettingsBottomSheet
 import org.vpinball.app.ui.theme.DarkBlack
 import org.vpinball.app.ui.theme.LightBlack
 import org.vpinball.app.ui.theme.VPinballTheme
@@ -104,8 +103,6 @@ fun LandingScreen(
 
     val progress = remember { mutableIntStateOf(0) }
     val status = remember { mutableStateOf("") }
-
-    var showSettingsDialog by remember { mutableStateOf(false) }
 
     val tableViewMode by viewModel.tableViewMode.collectAsStateWithLifecycle()
     val tableGridSize by viewModel.tableGridSize.collectAsStateWithLifecycle()
@@ -236,16 +233,7 @@ fun LandingScreen(
                 Box(modifier = Modifier.fillMaxWidth()) {
                     TopAppBar(
                         title = {},
-                        navigationIcon = {
-                            IconButton(onClick = { showSettingsDialog = true }) {
-                                Icon(
-                                    painter = painterResource(id = R.drawable.img_sf_gearshape),
-                                    contentDescription = null,
-                                    tint = Color.VpxDarkYellow,
-                                    modifier = Modifier.size(22.dp),
-                                )
-                            }
-                        },
+                        navigationIcon = {},
                         actions = {
                             Box {
                                 IconButton(onClick = { showTableListModeMenu = true }) {
@@ -510,44 +498,41 @@ fun LandingScreen(
     }
 
     errorMessage?.let { message ->
-        AlertDialog(
-            title = { Text(text = "TILT!", style = MaterialTheme.typography.titleMedium) },
-            text = { Text(message) },
-            onDismissRequest = {},
-            confirmButton = {
-                TextButton(onClick = { viewModel.clearError() }) {
-                    Text(
-                        text = "OK",
-                        color = Color.VpxRed,
-                        fontSize = MaterialTheme.typography.titleMedium.fontSize,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        viewModel.clearError()
-                        Link.TROUBLESHOOTING.open(context = context)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.8f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(text = "TILT!", style = MaterialTheme.typography.titleMedium, color = Color.VpxRed)
+                Text(text = message)
+                Row {
+                    TextButton(onClick = { viewModel.clearError() }) {
+                        Text(
+                            text = "OK",
+                            color = Color.VpxRed,
+                            fontSize = MaterialTheme.typography.titleMedium.fontSize,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
-                ) {
-                    Text(
-                        text = "Learn More",
-                        color = Color.VpxRed,
-                        fontSize = MaterialTheme.typography.titleMedium.fontSize,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    TextButton(
+                        onClick = {
+                            viewModel.clearError()
+                            Link.TROUBLESHOOTING.open(context = context)
+                        }
+                    ) {
+                        Text(
+                            text = "Learn More",
+                            color = Color.VpxRed,
+                            fontSize = MaterialTheme.typography.titleMedium.fontSize,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
                 }
-            },
-        )
+            }
+        }
     }
-
-    SettingsBottomSheet(
-        webServerURL = vpinballModel.webServerURL ?: "",
-        show = showSettingsDialog,
-        onDismissRequest = { showSettingsDialog = false },
-        onViewFile = onViewFile,
-    )
 }
 
 @Preview

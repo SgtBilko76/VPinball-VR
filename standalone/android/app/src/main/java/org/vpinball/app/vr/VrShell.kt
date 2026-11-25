@@ -7,23 +7,23 @@ import android.content.ContextWrapper
 import android.graphics.SurfaceTexture
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.util.AttributeSet
 import android.util.Log
 import android.view.Display
 import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.view.WindowMetrics
 import androidx.activity.ComponentActivity
-import androidx.annotation.RequiresApi
 import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.runtime.Composable
@@ -224,6 +224,9 @@ object VrShell {
 
     private fun baseWindow(): View? = presentation?.window?.decorView
 
+    /** The menu window's token: a dialog anchored to it renders on the same (virtual) display. */
+    internal fun menuToken(): IBinder? = presentation?.window?.decorView?.windowToken
+
     private fun windowFlags(view: View): Int = (view.layoutParams as? WindowManager.LayoutParams)?.flags ?: 0
 
     private fun containsPoint(view: View, x: Float, y: Float): Boolean {
@@ -358,8 +361,6 @@ object VrShell {
         if (hoverTarget === view) hoverTarget = null
     }
 
-    internal fun baseToken() = baseWindow()?.windowToken
-
     @Composable
     internal fun Content() {
         val act = activity ?: return
@@ -397,38 +398,131 @@ interface ActivityHost {
     val hostActivity: ComponentActivity
 }
 
-/** Context whose WindowManager records popup and dialog windows so input can be routed to them. */
-private class TrackingContext(base: Context, override val hostActivity: ComponentActivity) : ContextWrapper(base), ActivityHost {
-    private val wm by lazy { TrackingWindowManager(base.getSystemService(WINDOW_SERVICE) as WindowManager) }
+/**
+ * Context for the VR shell's UI.
+ *
+ * Wraps a display context for the virtual display rather than the Presentation's own context: that
+ * context is a window context (the Quest's presentation window type), and WindowManagerImpl refuses
+ * to add any window whose type differs from the context's (WindowManagerImpl asserts the match).
+ * A dialog asks for a different type, so it crashed with "Window type mismatch". A display context
+ * (window type 0) accepts every window type, and its windows are still placed on the virtual display.
+ * Dialogs opened from this context are tracked for controller input via [WindowTrackingFactory]:
+ * a view that ends up under a ViewRootImpl is the root of a new top-level window, which the shell
+ * then routes input to.
+ */
+private class TrackingContext(base: Context, override val hostActivity: ComponentActivity) :
+    ContextWrapper(base), ActivityHost {
 
-    override fun getSystemService(name: String): Any? = if (name == WINDOW_SERVICE) wm else super.getSystemService(name)
+    /**
+     * Context windows (dialogs) are added from. A plain display context (window type 0) is accepted
+     * for any window type; it has no window token though, and app-type windows (dialogs) require one
+     * — so it gets the menu window's token: a window anchored to the menu window renders on the same
+     * (virtual) display, like a status-bar panel is anchored to the status bar.
+     */
+    private val dialogContext: Context by lazy {
+        val dc = base.createDisplayContext(base.display)
+        val token = VrShell.menuToken() ?: windowTokenOf(base) ?: hostActivity.window.decorView.windowToken
+        if (token != null) setWindowToken(dc, token)
+        dc
+    }
+
+    override fun getSystemService(name: String): Any? = when (name) {
+        WINDOW_SERVICE -> trackedWindowManager
+        LAYOUT_INFLATER_SERVICE -> {
+            val inflater = dialogContext.getSystemService(name) as LayoutInflater
+            inflater.factory2 = WindowTrackingFactory(inflater)
+            inflater
+        }
+        else -> super.getSystemService(name)
+    }
+
+    /**
+     * Every window added through this context (Compose popups like the import dropdown, dialogs,
+     * pickers) is registered with [VrShell] so controller input is routed to it. Without this a
+     * popup window renders on the virtual display but is invisible to the input router, and taps on
+     * it fall straight through to the menu behind.
+     */
+    private val trackedWindowManager: WindowManager by lazy {
+        val wm = dialogContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        object : WindowManager by wm {
+            override fun addView(view: View, params: ViewGroup.LayoutParams) {
+                Log.i("VPX-VRShell", "Window added: ${view.javaClass.name}")
+                wm.addView(view, params)
+                VrShell.onWindowAdded(view)
+            }
+            override fun removeView(view: View) {
+                wm.removeView(view)
+                VrShell.onWindowRemoved(view)
+            }
+            override fun removeViewImmediate(view: View) {
+                wm.removeViewImmediate(view)
+                VrShell.onWindowRemoved(view)
+            }
+        }
+    }
+
+    /** Window token stored in the first underlying ContextImpl (hidden class, read reflectively). */
+    private fun windowTokenOf(context: Context): IBinder? {
+        var ctx: Context? = context
+        while (ctx != null) {
+            try {
+                val f = ctx.javaClass.getDeclaredField("mWindowToken")
+                f.isAccessible = true
+                val v = f.get(ctx)
+                if (v is IBinder) return v
+            } catch (t: Throwable) {
+                // Not a ContextImpl (or the field moved) — keep unwrapping.
+            }
+            ctx = (ctx as? ContextWrapper)?.baseContext
+        }
+        return null
+    }
+
+    /** Sets the hidden ContextImpl.mWindowToken via its setter (or the field directly). */
+    private fun setWindowToken(context: Context, token: IBinder) {
+        try {
+            val m = context.javaClass.getDeclaredMethod("setWindowToken", IBinder::class.java)
+            m.isAccessible = true
+            m.invoke(context, token)
+        } catch (t: Throwable) {
+            try {
+                val f = context.javaClass.getDeclaredField("mWindowToken")
+                f.isAccessible = true
+                f.set(context, token)
+            } catch (t2: Throwable) {
+                Log.w("VPX-VRShell", "Could not set dialog window token", t2)
+            }
+        }
+    }
 }
 
-private class TrackingWindowManager(private val base: WindowManager) : WindowManager by base {
-    override fun addView(view: View, params: ViewGroup.LayoutParams) {
-        val lp = params as? WindowManager.LayoutParams
-        if (lp != null && lp.type in WindowManager.LayoutParams.FIRST_APPLICATION_WINDOW..WindowManager.LayoutParams.LAST_APPLICATION_WINDOW) {
-            // Dialogs: attach them to the presentation window so they get a valid token on the virtual display.
-            lp.type = WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG
-            if (lp.token == null) lp.token = VrShell.baseToken()
-        }
-        base.addView(view, params)
-        VrShell.onWindowAdded(view)
+/** Adds [WINDOW_TRACKER] to every view created for [TrackingContext]. */
+private class WindowTrackingFactory(private val inflater: LayoutInflater) : LayoutInflater.Factory2 {
+    override fun onCreateView(name: String, context: Context, attrs: AttributeSet): View? = create(name, context, attrs)
+
+    override fun onCreateView(parent: View?, name: String, context: Context, attrs: AttributeSet): View? =
+        create(name, context, attrs)
+
+    private fun create(name: String, context: Context, attrs: AttributeSet): View? = try {
+        // The inflater's own default view creation (framework switch or reflection), plus the tracker.
+        val view = inflater.createView(context, name, null, attrs)
+        view?.addOnAttachStateChangeListener(WINDOW_TRACKER)
+        view
+    } catch (t: Throwable) {
+        null // let the inflater fall back to its default creation path
+    }
+}
+
+/**
+ * Registers views that become the root of a new top-level window (dialog, popup) so input can be
+ * routed to them. The parent class is compared by name: ViewRootImpl is not part of the SDK stubs.
+ */
+private val WINDOW_TRACKER = object : View.OnAttachStateChangeListener {
+    override fun onViewAttachedToWindow(v: View) {
+        if (v.parent?.javaClass?.name == "android.view.ViewRootImpl") VrShell.onWindowAdded(v)
     }
 
-    override fun removeView(view: View) {
-        VrShell.onWindowRemoved(view)
-        base.removeView(view)
+    override fun onViewDetachedFromWindow(v: View) {
+        if (v.parent?.javaClass?.name == "android.view.ViewRootImpl") VrShell.onWindowRemoved(v)
     }
-
-    override fun removeViewImmediate(view: View) {
-        VrShell.onWindowRemoved(view)
-        base.removeViewImmediate(view)
-    }
-
-    @RequiresApi(Build.VERSION_CODES.R)
-    override fun getCurrentWindowMetrics(): WindowMetrics = base.currentWindowMetrics
-
-    @RequiresApi(Build.VERSION_CODES.R)
-    override fun getMaximumWindowMetrics(): WindowMetrics = base.maximumWindowMetrics
 }
