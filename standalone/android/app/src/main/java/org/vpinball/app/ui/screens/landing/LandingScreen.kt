@@ -56,8 +56,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -233,7 +235,16 @@ fun LandingScreen(
                 Box(modifier = Modifier.fillMaxWidth()) {
                     TopAppBar(
                         title = {},
-                        navigationIcon = {},
+                        navigationIcon = {
+                            Text(
+                                text = "VR Port by Sgt.Bilko - PortRoyale.online",
+                                color = Color.VpxDarkYellow,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(start = 12.dp, end = 8.dp),
+                            )
+                        },
                         actions = {
                             Box {
                                 IconButton(onClick = { showTableListModeMenu = true }) {
