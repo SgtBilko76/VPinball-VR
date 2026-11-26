@@ -281,35 +281,6 @@ fun LandingScreen(
 
                                         launcher.launch(arrayOf("*/*"))
                                     },
-                                    onBlankTable = {
-                                        showImportTableMenu = false
-                                        try {
-                                            val assetFile = File(context.cacheDir, "blankTable.vpx")
-                                            context.assets.open("assets/blankTable.vpx").use { input ->
-                                                FileOutputStream(assetFile).use { output -> input.copyTo(output) }
-                                            }
-                                            importUri = assetFile.toUri()
-                                            importFilename = "blankTable.vpx"
-                                            showConfirmDialog = true
-                                        } catch (e: Exception) {
-                                            viewModel.setError("Failed to load blank table: ${e.message}")
-                                        }
-                                    },
-                                    onExampleTable = {
-                                        showImportTableMenu = false
-
-                                        try {
-                                            val assetFile = File(context.cacheDir, "exampleTable.vpx")
-                                            context.assets.open("assets/exampleTable.vpx").use { input ->
-                                                FileOutputStream(assetFile).use { output -> input.copyTo(output) }
-                                            }
-                                            importUri = assetFile.toUri()
-                                            importFilename = "exampleTable.vpx"
-                                            showConfirmDialog = true
-                                        } catch (e: Exception) {
-                                            viewModel.setError("Failed to load example table: ${e.message}")
-                                        }
-                                    },
                                     onDownloadFromArchive = {
                                         showImportTableMenu = false
                                         onOpenDownloader()
@@ -439,7 +410,7 @@ fun LandingScreen(
                                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                             }
 
-                                        context.startActivity(Intent.createChooser(shareIntent, "Share File: ${file.name}"))
+                                        context.startActivity(Intent.createChooser(shareIntent, "Share File: ${file.name}").apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
                                     },
                                     onError = { showProgress = false },
                                 )

@@ -1,7 +1,6 @@
 package org.vpinball.app.ui.screens.landing
 
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.DropdownMenu
@@ -26,8 +25,6 @@ fun ImportTableDropdownMenu(
     expanded: Boolean,
     onDismissRequest: () -> Unit,
     onFiles: () -> Unit,
-    onBlankTable: () -> Unit,
-    onExampleTable: () -> Unit,
     onDownloadFromArchive: () -> Unit = {},
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest) {
@@ -66,31 +63,6 @@ fun ImportTableDropdownMenu(
             text = { Text(text = "Download from Archive.org", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface) },
             onClick = onDownloadFromArchive,
         )
-
-        HorizontalDivider()
-
-        Spacer(modifier = Modifier.padding(all = 4.dp))
-
-        HorizontalDivider()
-
-        Text(
-            text = "Built in...",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(vertical = 4.dp).padding(horizontal = 12.dp),
-        )
-
-        HorizontalDivider()
-
-        DropdownMenuItem(
-            text = { Text(text = "blankTable.vpx", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface) },
-            onClick = onBlankTable,
-        )
-
-        DropdownMenuItem(
-            text = { Text(text = "exampleTable.vpx", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface) },
-            onClick = onExampleTable,
-        )
     }
 }
 
@@ -104,7 +76,7 @@ private fun ImportTableDropdownMenuPreview() {
                 TopAppBar(
                     title = { Text("VPinBall") },
                     actions = {
-                        ImportTableDropdownMenu(expanded = true, onDismissRequest = {}, onBlankTable = {}, onExampleTable = {}, onFiles = {})
+                        ImportTableDropdownMenu(expanded = true, onDismissRequest = {}, onFiles = {})
                     },
                 )
             }

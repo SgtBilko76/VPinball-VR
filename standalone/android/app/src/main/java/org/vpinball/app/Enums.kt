@@ -1,6 +1,7 @@
 package org.vpinball.app
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import java.io.File
@@ -23,8 +24,11 @@ enum class Link(val url: String) {
     THIRDPARTY("https://github.com/vpinball/vpinball/blob/master/third-party/README.md");
 
     fun open(context: Context) {
-        val intent = CustomTabsIntent.Builder().build()
-        intent.launchUrl(context, Uri.parse(url))
+        val customTabsIntent = CustomTabsIntent.Builder().build()
+        customTabsIntent.intent.data = Uri.parse(url)
+        // Required when the context is not an Activity (e.g. the VR shell's menu surface).
+        customTabsIntent.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(customTabsIntent.intent)
     }
 }
 

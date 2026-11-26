@@ -30,7 +30,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -42,16 +41,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.core.view.WindowCompat
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.roundToInt
@@ -101,27 +95,9 @@ fun CodeWebViewDialog(file: File, canClear: Boolean, onDismissRequest: () -> Uni
         }
     }
 
-    Dialog(
-        onDismissRequest = { dismiss() },
-        properties =
-            DialogProperties(
-                dismissOnBackPress = true,
-                dismissOnClickOutside = false,
-                usePlatformDefaultWidth = false,
-                decorFitsSystemWindows = false,
-            ),
-    ) {
-        val dialogWindow = (LocalView.current.parent as? DialogWindowProvider)?.window
-
-        DisposableEffect(darkMode, dialogWindow) {
-            dialogWindow?.let { window ->
-                val insetsController = WindowCompat.getInsetsController(window, window.decorView)
-                insetsController.isAppearanceLightStatusBars = !darkMode
-            }
-            onDispose {}
-        }
-
-        Box(modifier = modifier.fillMaxSize().offset { IntOffset(0, animatedOffset.roundToInt()) }) {
+    // Inline full-screen overlay instead of a Dialog: a Dialog built from the VR shell's
+    // tracking context crashes (Window.setWindowManager casts to final WindowManagerImpl).
+    Box(modifier = modifier.fillMaxSize().offset { IntOffset(0, animatedOffset.roundToInt()) }) {
             Surface(modifier = Modifier.fillMaxSize()) {
                 Column {
                     TopAppBar(
@@ -207,7 +183,6 @@ fun CodeWebViewDialog(file: File, canClear: Boolean, onDismissRequest: () -> Uni
                 }
             }
         }
-    }
 }
 
 private fun readFileContent(file: File): String {

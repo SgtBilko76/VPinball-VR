@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -118,6 +119,12 @@ class TableManager(private val context: Context) {
                     return@withContext false
                 }
 
+                // Attach the ROM (and NVRAM) from the Visual Pinball Collection on archive.org, like the
+                // "Download from Archive.org" flow. Best-effort: the table still imports if this fails.
+                for (table in newTables) {
+                    fetchRomForTable(table, onProgress)
+                }
+
                 _tables.value = _tables.value + newTables
                 saveTables()
                 withContext(Dispatchers.Main) {
@@ -128,6 +135,9 @@ class TableManager(private val context: Context) {
                 delay(500)
 
                 true
+            } catch (e: CancellationException) {
+                tempFile.delete()
+                throw e
             } catch (e: Exception) {
                 VPinballManager.log(VPinballLogLevel.ERROR, "Import error: ${e.message}")
                 tempFile.delete()
@@ -154,6 +164,46 @@ class TableManager(private val context: Context) {
             saveTables()
             withContext(Dispatchers.Main) { LandingScreenViewModel.triggerAddTables(listOf(table)) }
             table
+        }
+    }
+
+    /**
+     * Best-effort: fetches the table's ROM (and NVRAM) from the Visual Pinball Collection on archive.org
+     * and places them in the table folder, like the "Download from Archive.org" flow. If the ROM is
+     * missing, unavailable, or the network fails, the table still imports and runs — it just won't
+     * emulate the machine.
+     */
+    private suspend fun fetchRomForTable(table: Table, onProgress: (Int, String) -> Unit) {
+        val vpx = File(buildPath(table.path))
+        if (!vpx.exists()) return
+        try {
+            withContext(Dispatchers.Main) { onProgress(75, "Looking for the ROM...") }
+            RomFetcher.loadCollection()
+            val romName = withContext(Dispatchers.IO) { RomFetcher.findRomName(vpx) }
+            if (romName == null) return  // the table doesn't declare a ROM
+            val romPath = RomFetcher.romPath(romName)
+            if (romPath == null) {
+                VPinballManager.log(VPinballLogLevel.WARN, "ROM '$romName' is not in the collection; the table will run without it.")
+                return
+            }
+            withContext(Dispatchers.Main) { onProgress(80, "Downloading ROM $romName...") }
+            val tableDir = vpx.parentFile
+            val romDest = File(tableDir, "pinmame/roms/${File(romPath).name}")
+            RomFetcher.download(romPath, romDest)
+            RomFetcher.nvramPath(romName)?.let { nvPath ->
+                val nvDest = File(tableDir, "pinmame/nvram/${File(nvPath).name}")
+                try {
+                    RomFetcher.download(nvPath, nvDest)
+                } catch (e: Exception) {
+                    VPinballManager.log(VPinballLogLevel.WARN, "NVRAM download for $romName failed: ${e.message}")
+                }
+            }
+            withContext(Dispatchers.Main) { onProgress(95, "ROM $romName attached") }
+            VPinballManager.log(VPinballLogLevel.INFO, "Attached ROM $romName to ${table.name}")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            VPinballManager.log(VPinballLogLevel.WARN, "ROM fetch for ${table.name} failed: ${e.message}")
         }
     }
 

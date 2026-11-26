@@ -58,7 +58,7 @@ fun VPinballContent(viewModel: VPinballModel = koinActivityViewModel()) {
                                 putExtra(Intent.EXTRA_STREAM, fileUri)
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
-                        context.startActivity(Intent.createChooser(shareIntent, "Share File: $it"))
+                        context.startActivity(Intent.createChooser(shareIntent, "Share File: $it").apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
                     },
                 )
             }
